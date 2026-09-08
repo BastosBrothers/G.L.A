@@ -1,0 +1,29 @@
+{
+  "modelo": "gla-2",
+  "congelado": "deepseek-r1:8b",
+  "pasos": 19,
+  "balances": [
+    1.5,
+    1.5,
+    1.5,
+    1.5,
+    1.5,
+    1.5,
+    1.5,
+    1.2801,
+    0.9418,
+    1.5
+  ],
+  "rasgos": [
+    "procedural",
+    "modular",
+    "objetos",
+    "pocos_archivos",
+    "funciones",
+    "clases",
+    "entrada_main",
+    "manejo_errores",
+    "validar_entrada",
+    "corto"
+  ]
+}
