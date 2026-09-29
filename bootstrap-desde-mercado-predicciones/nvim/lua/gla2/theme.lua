@@ -16,6 +16,7 @@ function M.setup()
   hl(0, "Gla2Name", { fg = "#cccccc", bold = true })
   hl(0, "Gla2Rule", { fg = "#3c3c3c" })
   hl(0, "Gla2Ok", { fg = "#89d185" })
+  hl(0, "Gla2Busy", { fg = "#3794ff", bold = true })
   hl(0, "Gla2Warn", { fg = "#cca700" })
   hl(0, "Gla2Folder", { fg = "#dcb67a" })
   hl(0, "Gla2Hover", { bg = "#2a2d2e" })
@@ -30,14 +31,14 @@ function M.panel(win, kind)
     return
   end
   M.setup()
-  local normal = kind == "chat" and "Gla2Chat" or (kind == "input" and "Gla2Input" or "Gla2Sidebar")
+  local normal = (kind == "chat" or kind == "chat_busy") and "Gla2Chat" or (kind == "input" and "Gla2Input" or "Gla2Sidebar")
   vim.wo[win].number = false
   vim.wo[win].relativenumber = false
   vim.wo[win].signcolumn = "no"
   vim.wo[win].foldcolumn = "0"
   vim.wo[win].list = false
-  vim.wo[win].wrap = kind == "chat"
-  vim.wo[win].linebreak = kind == "chat"
+  vim.wo[win].wrap = kind == "chat" or kind == "chat_busy"
+  vim.wo[win].linebreak = kind == "chat" or kind == "chat_busy"
   vim.wo[win].cursorline = kind == "side"
   vim.wo[win].cursorlineopt = "line"
   vim.wo[win].fillchars = "eob: "
@@ -53,6 +54,8 @@ function M.panel(win, kind)
   }, ",")
   if kind == "side" then
     vim.wo[win].statusline = "  EXPLORER"
+  elseif kind == "chat_busy" then
+    vim.wo[win].statusline = "  CHAT  ·  trabajando…"
   elseif kind == "chat" then
     vim.wo[win].statusline = "  CHAT"
   elseif kind == "input" then

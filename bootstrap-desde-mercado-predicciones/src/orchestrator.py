@@ -68,8 +68,13 @@ _CHAT_MARKS = (
 
 _CODE_MARKS = (
     "haz ",
+    "haga",
+    "hagamos",
+    "vamos a",
     "crea ",
     "crear ",
+    "armemos",
+    "armar ",
     "programa",
     "código",
     "codigo",
@@ -80,18 +85,79 @@ _CODE_MARKS = (
     "edita",
     "refactor",
     "implementa",
+    "calculadora",
+    "menú",
+    "menu",
     "bug",
     "error",
     "test",
     "script",
+    "python",
     ".py",
     "skill",
+)
+
+_CREATE_MARKS = (
+    "haz ",
+    "haga",
+    "hagamos",
+    "vamos a",
+    "crea ",
+    "crear ",
+    "cree ",
+    "armemos",
+    "armar ",
+    "arma ",
+    "implementa",
+    "programa ",
+    "programar",
+    "escribe un",
+    "escribe una",
+    "hazme ",
+    "quiero una",
+    "quiero un",
+    "necesito una",
+    "necesito un",
+    "calculadora",
+    "nuevo proyecto",
+    "desde cero",
+    # Enunciados / inglés (SPOJ, etc.)
+    "your program",
+    "write a program",
+    "write a python",
+    "brute-force",
+    "brute force",
+    "rewrite small numbers",
+    "stop processing input",
+    "all numbers at input",
+    "sample input",
+    "sample output",
+    "enunciado",
+    "resuelve",
+    "resolver",
 )
 
 
 def wants_disk_write(text: str) -> bool:
     low = (text or "").lower()
     return any(token in low for token in _WRITE_INTENT)
+
+
+def wants_code_creation(text: str) -> bool:
+    """Pide un programa/archivo nuevo (no solo editar o charlar)."""
+    low = (text or "").strip().lower()
+    if not low:
+        return False
+    if any(mark in low for mark in _CREATE_MARKS):
+        return True
+    if re.search(r"\b(haz|crea|crear|arm[ae]|implementa|programa)\b", low):
+        return True
+    # Problema de programación con E/S típica.
+    if ("input" in low and "output" in low) and (
+        "42" in low or "program" in low or "integer" in low
+    ):
+        return True
+    return False
 
 
 def is_conversational(text: str) -> bool:
@@ -101,7 +167,7 @@ def is_conversational(text: str) -> bool:
         return False
     if any(mark in low for mark in _CODE_MARKS):
         return False
-    if wants_skill_authoring(low) or wants_disk_write(low):
+    if wants_code_creation(low) or wants_skill_authoring(low) or wants_disk_write(low):
         return False
     return any(mark in low for mark in _CHAT_MARKS)
 
@@ -152,6 +218,9 @@ def clean_model_text(text: str) -> str:
 
 def available_tools_for(message: str, graph_tools: list[str]) -> list[str]:
     if is_conversational(message):
+        return []
+    # Creación: sin tools para evitar JSON basura; el IDE aplica bloques ```file.
+    if wants_code_creation(message) and not wants_disk_write(message):
         return []
     tools = [name for name in graph_tools if name not in SELF_TOOLS]
     if wants_disk_write(message):
@@ -265,8 +334,10 @@ def run(
     max_tool_rounds: int = 4,
     confirm_write=None,
 ) -> EngineResponse:
-    language = detect_language(request.message, request.language)
-    if request.selection:
+    language = detect_language(request.message, None) or detect_language(
+        request.message, request.language
+    )
+    if request.selection and not language:
         language = detect_language(request.selection, language)
 
     selected: list[Skill] = select_skills(
@@ -283,9 +354,10 @@ def run(
 
     clean = strip_skill_directives(request.message) or request.message
     talk = is_conversational(clean)
+    create = (not talk) and wants_code_creation(clean)
     system = build_system_prompt(
         active_skills=[] if talk else graph.ordered,
-        tool_names=tool_names,
+        tool_names=[] if (talk or create) else tool_names,
         language=language,
     )
     if talk:
@@ -295,6 +367,45 @@ def run(
             "No llames herramientas. No entregues JSON ni bloques ```file. "
             "No inventes skills ni archivos.\n"
         )
+    elif create:
+        multi = _wants_multi_file(clean)
+        system += (
+            "\n\n## Modo creación\n\n"
+            "Contrato fijo:\n"
+            "1) Una o dos frases: qué vas a crear.\n"
+            "2) Bloque(s) ```file con path relativo nuevo y código completo.\n"
+            "3) Cómo ejecutarlo en terminal.\n"
+            "El IDE escribe los archivos: NO digas que el usuario abra el editor "
+            "ni cree archivos a mano.\n"
+            "path nunca absoluto; nunca .ps1/.bat si pidió Python. "
+            "Sin placeholders, sin hello world, sin JSON, sin `pass` de relleno.\n"
+        )
+        if multi:
+            system += (
+                "El usuario pide VARIOS archivos. Entrega un bloque ```file "
+                "distinto por cada ejercicio/resultado. Prohibido fusionarlos "
+                "en un solo app/main.py vacío.\n"
+            )
+    suggest = _suggest_create_path(clean, language) if create else None
+    user_extra = None if talk else request.extra_context
+    if create:
+        user_extra = (
+            (user_extra or "").strip()
+            or "Modo creación: archivos nuevos relativos al proyecto."
+        )
+        if _wants_multi_file(clean):
+            user_extra += (
+                "\nEntrega varios bloques ```file (uno por ejercicio), "
+                "p.ej. ejercicios/01_....py, ejercicios/02_....py, ejercicios/03_....py. "
+                "Código real del historial. Prohibido un stub único en app/main.py."
+            )
+        elif suggest:
+            user_extra += (
+                f"\nUsa esta ruta relativa: {suggest}\n"
+                "Formato obligatorio: bloque ```file, línea path:, línea ---, "
+                "luego el código real completo, luego cierre ```. "
+                "Sin cuerpo vacío y sin rutas absolutas."
+            )
     messages: list[dict[str, Any]] = [
         {
             "role": "system",
@@ -306,30 +417,39 @@ def run(
                 clean,
                 selection=None if talk else request.selection,
                 diagnostics=None if talk else request.diagnostics,
-                extra_context=None if talk else request.extra_context,
+                extra_context=user_extra,
             ),
         },
     ]
-    tools = [] if talk else openai_tools(tool_names)
+    tools = [] if (talk or create) else openai_tools(tool_names)
     trace: list[ToolTrace] = []
     final = ModelTurn(content="")
+    predict = 1400 if create else None
 
     for round_index in range(max_tool_rounds + 1):
-        final = chat(messages, tools=tools or None, model=request.model)
+        final = chat(
+            messages,
+            tools=tools or None,
+            model=request.model,
+            num_predict=predict,
+        )
         if not final.tool_calls:
             break
-        if talk:
-            # Charla: ignora tool dumps y pide texto humano una vez.
+        if talk or create:
+            nudge = (
+                "Responde solo con texto humano. Sin JSON ni herramientas."
+                if talk
+                else (
+                    f"Entrega el programa en ```file con path: {suggest}. "
+                    "Código completo. Sin JSON ni rutas absolutas."
+                )
+            )
             final = chat(
                 messages
-                + [
-                    {
-                        "role": "user",
-                        "content": "Responde solo con texto humano. Sin JSON ni herramientas.",
-                    }
-                ],
+                + [{"role": "user", "content": nudge}],
                 tools=None,
                 model=request.model,
+                num_predict=predict,
             )
             break
         if round_index >= max_tool_rounds:
@@ -356,13 +476,335 @@ def run(
     text = strip_tool_dumps(clean_model_text(final.content or ""))
     if talk and (not text or text.startswith("{")):
         text = "Hola. Estoy bien, listo para ayudarte a programar. ¿Qué quieres hacer?"
+    if create and (
+        _looks_like_demo_echo(text) or not _create_output_ok(text, language, suggest)
+    ):
+        # Reintento limpio (pase A): prioriza el fence válido.
+        retry_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Eres Gla-2. Entrega el programa pedido en un bloque ```file "
+                    "con path relativo y código completo y real. "
+                    "Puedes poner una frase breve antes; lo importante es el código."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"{clean}\n\n"
+                    f"Entrega un bloque ```file con path: {suggest} "
+                    "y el código completo debajo de ---. "
+                    "Sin rutas absolutas, sin editar otros archivos, sin placeholders."
+                ),
+            },
+        ]
+        final = chat(
+            retry_messages,
+            tools=None,
+            model=request.model,
+            num_predict=predict,
+        )
+        text = strip_tool_dumps(clean_model_text(final.content or ""))
+    # Si se agotaron tools sin texto útil: un pase final sin herramientas.
+    if (not talk) and (not text or text.startswith("(")) and (
+        final.tool_calls or "límite de rondas" in (text or "")
+    ):
+        suggest = suggest or _suggest_create_path(clean, language)
+        final = chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Eres Gla-2. Sin herramientas. Entrega el programa en "
+                        f"```file con path: {suggest} y código completo."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"{clean}\n\n"
+                        f"Resuelve el problema. Bloque ```file path: {suggest}. "
+                        "Sin JSON ni tools."
+                    ),
+                },
+            ],
+            tools=None,
+            model=request.model,
+            num_predict=predict or 1400,
+        )
+        text = strip_tool_dumps(clean_model_text(final.content or ""))
+        create = True
     if final.tool_calls and not text and not talk:
-        text = "(El modelo pidió herramientas pero se alcanzó el límite de rondas.)"
+        text = (
+            "No pude terminar con herramientas. "
+            "Reintenta el pedido o pide: crea el programa en un archivo Python."
+        )
+    patches = None if talk else extract_patches(text)
+    if create and suggest and patches and patches.files:
+        patches.files = _normalize_create_paths(
+            patches.files, suggest, language, multi=_wants_multi_file(clean)
+        )
+    # Descartar stubs: no aplicar plantillas vacías al proyecto.
+    if patches and patches.files:
+        real = [f for f in patches.files if not _is_stub_content(f.content or "")]
+        dropped = len(patches.files) - len(real)
+        patches.files = real
+        if dropped and not real and create:
+            text = (
+                (text or "").rstrip()
+                + "\n\n(No apliqué stubs vacíos. Vuelve a pedir los ejercicios "
+                "con el historial o pega el código a conservar.)"
+            )
+
+    # Pase B (solo create): explicación estable; patches siguen siendo los de A.
+    if create and patches and patches.files:
+        text = _explain_create_pass(
+            clean,
+            code_text=text,
+            patches=patches,
+            language=language,
+            model=request.model,
+        )
+
     return EngineResponse(
         message=text,
         skills=[] if talk else graph.names,
         tools_available=tool_names,
         tool_trace=trace,
-        patches=None if talk else extract_patches(text),
+        patches=patches,
         language=language,
     )
+
+
+def _explain_create_pass(
+    user_request: str,
+    *,
+    code_text: str,
+    patches: PatchSet,
+    language: str | None,
+    model: str | None,
+) -> str:
+    """Pase B: prosa corta sin regenerar código. patches ya vienen del pase A."""
+    _ = code_text  # el fence visible se reconstruye desde patches
+    paths = [item.path for item in patches.files if item.path]
+    path_list = ", ".join(f"`{p}`" for p in paths) or "`(archivo)`"
+    run_hint = {
+        "python": f"python {paths[0]}" if paths else "python main.py",
+        "rust": "cargo run",
+        "c": "compila y ejecuta el binario",
+    }.get((language or "python"), f"ejecuta {paths[0]}" if paths else "ejecuta el programa")
+
+    explain = chat(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "Eres Gla-2. Explica en español, en 2–3 frases, qué hace el programa "
+                    "y cómo ejecutarlo en terminal. "
+                    "Prohibido decir que el usuario abra el editor, cree archivos a mano "
+                    "o pegue código: el IDE ya escribe los archivos. "
+                    "Sin bloques ```file, sin JSON, solo prosa."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Pedido del usuario: {user_request.strip()}\n"
+                    f"Archivos que el IDE va a crear: {path_list}\n"
+                    f"Comando típico: {run_hint}\n"
+                    "Explica qué hace y cómo probarlo."
+                ),
+            },
+        ],
+        tools=None,
+        model=model,
+        num_predict=220,
+    )
+    prose = strip_tool_dumps(clean_model_text(explain.content or "")).strip()
+    if (
+        not prose
+        or prose.startswith("{")
+        or "```file" in prose.lower()
+        or _looks_like_demo_echo(prose)
+        or _is_manual_tutorial(prose)
+    ):
+        prose = (
+            f"Voy a crear {path_list} en el proyecto. "
+            f"Para probarlo: `{run_hint}`."
+        )
+    # Mensaje estable: prosa + fences ```file reales (el IDE aplica patches, no el tutorial).
+    return _format_create_message(prose, patches)
+
+
+def _is_manual_tutorial(text: str) -> bool:
+    low = (text or "").lower()
+    marks = (
+        "abre tu editor",
+        "abre el editor",
+        "crea un nuevo archivo",
+        "editor de código favorito",
+        "agrega el siguiente código",
+        "paso 1:",
+        "pega el código",
+    )
+    return any(mark in low for mark in marks)
+
+
+def _format_create_message(prose: str, patches: PatchSet) -> str:
+    parts = [prose.strip()] if prose.strip() else []
+    for item in patches.files:
+        body = (item.content or "").rstrip() + "\n"
+        parts.append(f"```file\npath: {item.path}\n---\n{body}```")
+    parts.append("El IDE crea estos archivos solos en el proyecto (no hace falta pegarlos a mano).")
+    return "\n\n".join(parts)
+
+
+def _normalize_create_paths(
+    files: list,
+    suggest: str,
+    language: str | None,
+    *,
+    multi: bool = False,
+) -> list:
+    """Si el modelo entregó main.py suelto, súbelo a la ruta sugerida.
+    En multi-archivo no fusionar todo a un solo path."""
+    want_ext = {
+        "python": ".py",
+        "rust": ".rs",
+        "c": ".c",
+    }.get((language or "python"), ".py")
+    fixed = []
+    for index, item in enumerate(files):
+        path = (item.path or "").replace("\\", "/")
+        low = path.lower()
+        bare = "/" not in path
+        wrong_place = any(
+            token in low for token in ("gestor-git", "panel.ps1", "hola-mundo")
+        )
+        if multi:
+            if wrong_place or (want_ext and not path.endswith(want_ext)):
+                item.path = f"ejercicios/{index + 1:02d}_main{want_ext}"
+            elif bare:
+                stem = path.rsplit(".", 1)[0] or f"ej{index + 1}"
+                item.path = f"ejercicios/{stem}{want_ext}"
+        elif wrong_place or bare or not path.endswith(want_ext):
+            item.path = suggest
+        fixed.append(item)
+    return fixed
+
+
+def _wants_multi_file(message: str) -> bool:
+    low = (message or "").lower()
+    marks = (
+        "tres archivos",
+        "tres ejercicios",
+        "archivos separados",
+        "retomemos",
+        "retomar",
+        "varios archivos",
+        "cada ejercicio",
+        "correspondientes",
+        "separados",
+    )
+    if any(mark in low for mark in marks):
+        return True
+    return bool(re.search(r"\b(dos|tres|cuatro|2|3|4)\s+archivos?\b", low))
+
+
+def _is_stub_content(content: str) -> bool:
+    low = (content or "").lower()
+    if not low.strip():
+        return True
+    if "aquí va el código" in low or "aqui va el codigo" in low:
+        return True
+    if "puedes agregar tu código" in low or "puedes agregar tu codigo" in low:
+        return True
+    if "aquí puedes agregar" in low or "aqui puedes agregar" in low:
+        return True
+    compact = re.sub(r"\s+", " ", low)
+    if "def main(" in compact and " pass" in compact and len(compact) < 180:
+        return True
+    if len(re.sub(r"\s", "", content or "")) < 40:
+        return True
+    return False
+
+
+def _suggest_create_path(message: str, language: str | None) -> str:
+    low = (message or "").lower()
+    ext = {"python": "py", "rust": "rs", "c": "c"}.get((language or "python"), "py")
+    if _wants_multi_file(low):
+        return f"ejercicios/01_main.{ext}"
+    for word, folder in (
+        ("calculadora", "calculadora"),
+        ("calculator", "calculadora"),
+        ("answer to life", "life"),
+        ("universe, and everything", "life"),
+        ("42", "life"),
+        ("menu", "menu"),
+        ("menú", "menu"),
+        ("juego", "juego"),
+        ("api", "api"),
+        ("bot", "bot"),
+        ("script", "script"),
+    ):
+        if word in low:
+            return f"{folder}/main.{ext}"
+    return f"app/main.{ext}"
+
+
+def _create_output_ok(
+    text: str, language: str | None, suggest: str | None
+) -> bool:
+    patches = extract_patches(text or "")
+    if not patches.files:
+        return False
+    want_ext = {
+        "python": ".py",
+        "rust": ".rs",
+        "c": ".c",
+    }.get((language or "python"), ".py")
+    multi = _wants_multi_file(text or "")
+    if multi and len(patches.files) < 2:
+        return False
+    for item in patches.files:
+        path = (item.path or "").replace("\\", "/").lower()
+        body = (item.content or "").strip()
+        if _is_stub_content(body):
+            return False
+        if path.endswith((".ps1", ".bat", ".cmd")) and want_ext == ".py":
+            return False
+        if "gestor-git" in path or "panel.ps1" in path:
+            return False
+        if want_ext and not path.endswith(want_ext):
+            return False
+        if ":" in path or path.startswith("/"):
+            return False
+    return True
+
+
+def _looks_like_demo_echo(text: str) -> bool:
+    low = (text or "").lower()
+    if "print(\"hola\")" in low or "print('hola')" in low:
+        return True
+    if "hola mundo" in low or "¡hola mundo!" in low or "hola-mundo" in low:
+        return True
+    if "aquí va el código" in low or "aqui va el codigo" in low:
+        return True
+    if "puedes agregar tu código" in low or "puedes agregar tu codigo" in low:
+        return True
+    if "aquí puedes agregar" in low or "aqui puedes agregar" in low:
+        return True
+    if "agregar_a_skill" in low and "```file" not in low:
+        return True
+    if re.search(r"path:\s*[a-z]:[\\/]", low) or re.search(r"```file,\s*[a-z]:", low):
+        return True
+    if "gestor-git" in low or "panel.ps1" in low:
+        return True
+    if "```file" in low and "---" in low:
+        patches = extract_patches(text)
+        if not patches.files:
+            return True
+        if all(_is_stub_content(f.content or "") for f in patches.files):
+            return True
+    return False

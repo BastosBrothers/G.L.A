@@ -11,11 +11,7 @@ from src.paths import FORMATO_PATH
 EJEMPLO = """```file
 path: main.py
 ---
-def main() -> None:
-    print("hola")
-
-if __name__ == "__main__":
-    main()
+# código completo del programa que pidió el usuario
 ```"""
 
 PLANTILLA = f"""Regla dura de entrega. Tu respuesta completa debe ser solo bloques así:
@@ -26,7 +22,7 @@ Obligatorio:
 1. Empieza con ```file
 2. La siguiente línea es exactamente: path: main.py
 3. La siguiente línea es exactamente: ---
-4. Luego el código Python completo.
+4. Luego el código Python completo del pedido (no un hello world ni print("hola")).
 5. Cierra con ```
 6. Sin texto antes, sin texto después, sin ```python, sin # file.
 """
@@ -103,7 +99,8 @@ def lecciones(limit: int = 3) -> str:
 def correccion(motivo: str) -> str:
     return (
         f"Tu respuesta anterior falló: {motivo}. "
-        "Reescribe TODO el programa otra vez. "
+        "Reescribe TODO el programa pedido otra vez. "
         f"Usa exactamente este molde:\n{EJEMPLO}\n"
-        "Sustituye el print por el programa completo. Sin explicación."
+        "El cuerpo debe implementar lo que pidió el usuario. "
+        "Prohibido hello world, print(\"hola\") o copiar el ejemplo. Sin explicación."
     )

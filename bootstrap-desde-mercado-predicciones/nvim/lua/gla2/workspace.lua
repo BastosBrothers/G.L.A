@@ -357,14 +357,35 @@ function M.context(query)
   end
   local files = {}
   collect(state.root, 1, files, 40)
+  local tops = {}
+  local ok_top, names = pcall(vim.fn.readdir, state.root)
+  if ok_top and type(names) == "table" then
+    table.sort(names)
+    for _, name in ipairs(names) do
+      if name:sub(1, 1) ~= "." and not ignore[name] then
+        local child = state.root .. "\\" .. name
+        if vim.fn.isdirectory(child) == 1 then
+          table.insert(tops, name)
+        end
+      end
+    end
+  end
   local needle = (query or ""):lower()
   local lines = {
     "Carpeta de trabajo: " .. state.root,
     "Edita o crea solo dentro de esta carpeta. Las rutas nuevas son relativas a ella.",
-    "Si un archivo ya existe, modifica ese path. Si no existe, créalo.",
+    "Si el pedido es un programa nuevo, crea una carpeta/archivo nuevos. No reutilices un subproyecto ajeno.",
+    "Si un archivo ya existe y el usuario pide cambiarlo, modifica ese path.",
     "",
-    "Árbol:",
   }
+  if #tops > 0 then
+    table.insert(lines, "Subcarpetas de primer nivel (no mezclar entre sí salvo que el usuario lo pida):")
+    for _, name in ipairs(tops) do
+      table.insert(lines, "- " .. name .. "/")
+    end
+    table.insert(lines, "")
+  end
+  table.insert(lines, "Árbol:")
   for _, path in ipairs(files) do
     table.insert(lines, "- " .. rel_path(path))
   end

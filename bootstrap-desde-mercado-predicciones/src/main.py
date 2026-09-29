@@ -140,9 +140,46 @@ def cmd_json(_: argparse.Namespace) -> int:
 
     extra = payload.get("extra_context")
     path = payload.get("path")
-    if path:
-        prefix = f"Archivo activo: {path}"
-        extra = f"{prefix}\n\n{extra}" if extra else prefix
+    project_root = payload.get("project_root")
+    mode = str(payload.get("mode") or "").strip().lower()
+    # En creación el modelo chico copia rutas absolutas y el archivo abierto.
+    # Solo dejamos una instrucción corta, sin árbol ni Panel.ps1.
+    # Sí conservamos el historial si el IDE lo mandó (retomemos / varios archivos).
+    if mode == "create":
+        root_name = ""
+        if project_root:
+            from pathlib import Path
+
+            root_name = Path(str(project_root)).name
+        prior = str(extra or "")
+        history = ""
+        if "Historial" in prior:
+            # Conservar desde la marca de historial hasta el final.
+            idx = prior.find("Historial")
+            history = prior[idx:].strip()
+        extra = (
+            f"Proyecto: {root_name or 'activo'}. "
+            "Modo creación: entrega bloque(s) ```file con path relativo nuevo "
+            "y código completo del pedido. "
+            "Prohibido stubs (pass / 'aquí puedes agregar'), rutas absolutas "
+            "o pisar trabajo bueno con plantillas vacías."
+        )
+        if history:
+            extra = (
+                f"{extra}\n\n{history}\n\n"
+                "Si el usuario pide varios ejercicios/archivos, un ```file por cada uno "
+                "con el código real del historial (no un solo app/main.py vacío)."
+            )
+    else:
+        if project_root:
+            root_line = f"Proyecto activo (carpeta de trabajo): {project_root}"
+            extra = f"{root_line}\n\n{extra}" if extra else root_line
+        if path:
+            prefix = (
+                "Archivo activo (solo para editar si el pedido habla de este archivo): "
+                f"{path}"
+            )
+            extra = f"{prefix}\n\n{extra}" if extra else prefix
 
     request = EngineRequest(
         message=message,
@@ -202,6 +239,13 @@ def cmd_skill_graph(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_aprender(_: argparse.Namespace) -> int:
+    from src.colaboracion import aprender_desde_cursor
+
+    print(aprender_desde_cursor())
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m src.main",
@@ -226,6 +270,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_box = sub.add_parser("sandbox", help="Probar una petición de varias formas y guardar lo validado")
     p_box.add_argument("message", help="Qué debe cumplir el modelo")
     p_box.set_defaults(func=cmd_sandbox)
+
+    p_aprender = sub.add_parser(
+        "aprender",
+        help="Importar lecciones de colaboración desde transcripts de Cursor",
+    )
+    p_aprender.set_defaults(func=cmd_aprender)
 
     p_skill = sub.add_parser("skill", help="Catálogo y grafo de skills")
     skill_sub = p_skill.add_subparsers(dest="skill_command", required=True)

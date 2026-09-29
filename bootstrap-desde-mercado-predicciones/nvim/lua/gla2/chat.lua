@@ -10,7 +10,100 @@ local state = {
   last = nil,
   root = nil,
   turns = {},
+  spin = 1,
+  spin_timer = nil,
 }
+
+local SPIN = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
+
+local render_chat
+
+local function stop_spinner()
+  if state.spin_timer then
+    state.spin_timer:stop()
+    state.spin_timer:close()
+    state.spin_timer = nil
+  end
+end
+
+local function start_spinner()
+  stop_spinner()
+  state.spin = 1
+  local uv = vim.uv or vim.loop
+  state.spin_timer = uv.new_timer()
+  state.spin_timer:start(0, 120, function()
+    vim.schedule(function()
+      if not state.busy or not state.spin_timer then
+        return
+      end
+      state.spin = (state.spin % #SPIN) + 1
+      if state.chat_buf and vim.api.nvim_buf_is_valid(state.chat_buf) then
+        render_chat()
+      end
+    end)
+  end)
+end
+
+local function busy_mark()
+  return SPIN[state.spin] or "●"
+end
+
+render_chat = function()
+  if not state.chat_buf or not vim.api.nvim_buf_is_valid(state.chat_buf) then
+    return
+  end
+  local theme = require("gla2.theme")
+  local title = state.root and vim.fn.fnamemodify(state.root, ":t") or "sin proyecto"
+  local model = require("gla2.models")
+  local status = state.busy and (busy_mark() .. " trabajando") or "● listo"
+  local lines = {
+    "  CHAT",
+    "  " .. title .. "   ·   " .. model.current(),
+    "  " .. status,
+    "",
+  }
+  local marks = {
+    { line = 0, group = "Gla2Muted" },
+    { line = 1, group = "Gla2Name" },
+    { line = 2, group = state.busy and "Gla2Busy" or "Gla2Ok" },
+  }
+  for _, turn in ipairs(state.turns) do
+    if turn.role == "user" then
+      table.insert(lines, "  tú")
+      table.insert(marks, { line = #lines - 1, group = "Gla2User" })
+      table.insert(lines, "")
+      vim.list_extend(lines, vim.split("  " .. (turn.text or ""):gsub("\n", "\n  "), "\n", { plain = true }))
+      table.insert(lines, "")
+    else
+      table.insert(lines, "  gla-2")
+      table.insert(marks, { line = #lines - 1, group = "Gla2Accent" })
+      table.insert(lines, "")
+      for _, row in ipairs(vim.split(turn.text or "", "\n", { plain = true })) do
+        table.insert(lines, row == "" and "" or ("  " .. row))
+      end
+      table.insert(lines, "")
+    end
+  end
+  if state.busy then
+    table.insert(lines, "")
+    table.insert(lines, "  ┌─────────────────────────┐")
+    table.insert(lines, "  │  " .. busy_mark() .. "  GLA-2          │")
+    table.insert(lines, "  │     trabajando…         │")
+    table.insert(lines, "  └─────────────────────────┘")
+    table.insert(marks, { line = #lines - 4, group = "Gla2Busy" })
+    table.insert(marks, { line = #lines - 3, group = "Gla2Busy" })
+    table.insert(marks, { line = #lines - 2, group = "Gla2Muted" })
+    table.insert(marks, { line = #lines - 1, group = "Gla2Busy" })
+  end
+  vim.bo[state.chat_buf].modifiable = true
+  vim.api.nvim_buf_set_lines(state.chat_buf, 0, -1, false, lines)
+  vim.bo[state.chat_buf].modifiable = true
+  theme.paint(state.chat_buf, marks)
+  theme.panel(state.chat_win, state.busy and "chat_busy" or "chat")
+  if state.chat_win and vim.api.nvim_win_is_valid(state.chat_win) then
+    vim.api.nvim_win_set_cursor(state.chat_win, { #lines, 0 })
+  end
+end
 
 local function engine_root()
   if vim.g.gla2_engine and vim.g.gla2_engine ~= "" then
@@ -75,69 +168,71 @@ local function load_history(root)
   return decoded.turns
 end
 
-local function history_context()
+local function wants_recall(text)
+  local low = (text or ""):lower()
+  local marks = {
+    "retomemos",
+    "retoma",
+    "retomar",
+    "los tres",
+    "tres archivos",
+    "tres ejercicios",
+    "archivos separados",
+    "ejercicios que",
+    "correspondientes",
+    "lo que hicimos",
+    "lo que hemos",
+    "anteriores",
+    "otra vez los",
+  }
+  for _, mark in ipairs(marks) do
+    if low:find(mark, 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
+local function history_context(opts)
+  opts = opts or {}
+  local recall = opts.recall == true
   if #state.turns == 0 then
     return ""
   end
   local lines = { "Historial de este proyecto:" }
-  local start = math.max(1, #state.turns - 7)
+  local keep = recall and 14 or 7
+  local start = math.max(1, #state.turns - keep)
   for i = start, #state.turns do
     local turn = state.turns[i]
-    local who = turn.role == "user" and "Usuario" or "Gla-2"
-    local text = (turn.text or ""):gsub("\n", " ")
-    if #text > 280 then
-      text = text:sub(1, 280) .. "…"
-    end
-    table.insert(lines, who .. ": " .. text)
-  end
-  return table.concat(lines, "\n")
-end
-
-local function render_chat()
-  if not state.chat_buf or not vim.api.nvim_buf_is_valid(state.chat_buf) then
-    return
-  end
-  local theme = require("gla2.theme")
-  local title = state.root and vim.fn.fnamemodify(state.root, ":t") or "sin proyecto"
-  local model = require("gla2.models")
-  local lines = {
-    "  CHAT",
-    "  " .. title .. "   ·   " .. model.current(),
-    "",
-  }
-  local marks = {
-    { line = 0, group = "Gla2Muted" },
-    { line = 1, group = "Gla2Name" },
-  }
-  for _, turn in ipairs(state.turns) do
-    if turn.role == "user" then
-      table.insert(lines, "  tú")
-      table.insert(marks, { line = #lines - 1, group = "Gla2User" })
-      table.insert(lines, "")
-      vim.list_extend(lines, vim.split("  " .. (turn.text or ""):gsub("\n", "\n  "), "\n", { plain = true }))
-      table.insert(lines, "")
-    else
-      table.insert(lines, "  gla-2")
-      table.insert(marks, { line = #lines - 1, group = "Gla2Accent" })
-      table.insert(lines, "")
-      for _, row in ipairs(vim.split(turn.text or "", "\n", { plain = true })) do
-        table.insert(lines, row == "" and "" or ("  " .. row))
+    local text = turn.text or ""
+    local low = text:lower()
+    if turn.role == "assistant" then
+      if low:find("agregar_a_skill", 1, true)
+        or low:find('"name":', 1, true)
+        or low:find("```tool", 1, true)
+        or low:find("hola-mundo", 1, true)
+        or low:find('print("hola")', 1, true)
+        or low:find("print('hola')", 1, true)
+      then
+        goto continue
       end
-      table.insert(lines, "")
     end
+    local who = turn.role == "user" and "Usuario" or "Gla-2"
+    -- En recall conservar más código; en creación normal truncar.
+    local max_len = recall and 1200 or 280
+    if not recall then
+      text = text:gsub("\n", " ")
+    end
+    if #text > max_len then
+      text = text:sub(1, max_len) .. "…"
+    end
+    table.insert(lines, who .. ":\n" .. text)
+    ::continue::
   end
-  if state.busy and state.root then
-    table.insert(lines, "  trabajando en " .. title .. "…")
-    table.insert(marks, { line = #lines - 1, group = "Gla2Warn" })
+  if #lines == 1 then
+    return ""
   end
-  vim.bo[state.chat_buf].modifiable = true
-  vim.api.nvim_buf_set_lines(state.chat_buf, 0, -1, false, lines)
-  vim.bo[state.chat_buf].modifiable = true
-  theme.paint(state.chat_buf, marks)
-  theme.panel(state.chat_win, "chat")
-  if state.chat_win and vim.api.nvim_win_is_valid(state.chat_win) then
-    vim.api.nvim_win_set_cursor(state.chat_win, { #lines, 0 })
-  end
+  return table.concat(lines, "\n\n")
 end
 
 local function append(buf, lines)
@@ -350,6 +445,28 @@ local function apply_diffs(diffs)
   return 0
 end
 
+local function is_stub_content(content)
+  local low = (content or ""):lower()
+  if low:find("aquí va el código", 1, true) or low:find("aqui va el codigo", 1, true) then
+    return true
+  end
+  if low:find("puedes agregar tu código", 1, true) or low:find("puedes agregar tu codigo", 1, true) then
+    return true
+  end
+  if low:find("aquí puedes agregar", 1, true) or low:find("aqui puedes agregar", 1, true) then
+    return true
+  end
+  -- Cuerpo casi vacío: solo pass / main vacía.
+  local stripped = low:gsub("%s+", " ")
+  if stripped:find("def main%(") and stripped:find("%spass%s") and #stripped < 180 then
+    return true
+  end
+  if #((content or ""):gsub("%s", "")) < 40 then
+    return true
+  end
+  return false
+end
+
 local function apply_files(files)
   local root = workspace().root()
   if not root or not files or #files == 0 then
@@ -357,19 +474,41 @@ local function apply_files(files)
   end
   local applied = 0
   local first = nil
+  local root_norm = vim.fn.fnamemodify(root, ":p"):gsub("[\\/]+$", ""):lower()
   for _, item in ipairs(files) do
     local rel = (item.path or ""):gsub("\\", "/"):gsub("^/+", "")
-    if rel == "" or rel:find("%.%.") then
-      append(state.chat_buf, { "  (ruta inválida, no creada: " .. tostring(item.path) .. ")" })
+    local content = item.content or ""
+    local bad = rel == ""
+      or rel:find("%.%.")
+      or rel:match("^%a:")
+      or rel:sub(1, 1) == "/"
+      or is_stub_content(content)
+    if bad then
+      append(state.chat_buf, { "  (stub o ruta inválida, no escrito: " .. tostring(item.path) .. ")" })
     else
-      local full = root .. "\\" .. rel:gsub("/", "\\")
-      vim.fn.mkdir(vim.fn.fnamemodify(full, ":h"), "p")
-      vim.fn.writefile(vim.split(item.content or "", "\n", { plain = true }), full)
-      applied = applied + 1
-      if not first then
-        first = full
+      local full = vim.fn.fnamemodify(root .. "/" .. rel, ":p")
+      local full_norm = full:lower()
+      if not vim.startswith(full_norm, root_norm) then
+        append(state.chat_buf, { "  (fuera del proyecto, no creado: " .. tostring(item.path) .. ")" })
+      else
+        -- No pisar un archivo con código real usando un stub peor (ya filtrado) ni vacío.
+        local exists = vim.fn.filereadable(full) == 1
+        if exists then
+          local old = table.concat(vim.fn.readfile(full), "\n")
+          if #old > #content + 40 and not is_stub_content(old) then
+            append(state.chat_buf, { "  (conservado existente, no sobrescrito: " .. rel .. ")" })
+            goto continue_file
+          end
+        end
+        vim.fn.mkdir(vim.fn.fnamemodify(full, ":h"), "p")
+        vim.fn.writefile(vim.split(content, "\n", { plain = true }), full)
+        applied = applied + 1
+        if not first then
+          first = full
+        end
       end
     end
+    ::continue_file::
   end
   if first then
     open_in_editor(first)
@@ -380,40 +519,130 @@ end
 local function apply_last()
   if not state.last or not state.last.patches then
     append(state.chat_buf, { "  (no hay parche pendiente)" })
-    return
+    return 0, {}
   end
   local buf = focus_code()
   local patches = state.last.patches
-  local n = apply_files(patches.files or {})
+  local created = {}
+  local files = patches.files or {}
+  for _, item in ipairs(files) do
+    if item.path and item.path ~= "" then
+      table.insert(created, item.path)
+    end
+  end
+  local n = apply_files(files)
   n = n + apply_replaces(patches.replaces or {}, buf)
   n = n + apply_diffs(patches.diffs or {})
-  if n == 0 then
-    append(state.chat_buf, { "  No se aplicó ningún cambio." })
-    return
+  if n > 0 then
+    workspace().refresh()
   end
-  local name = buf and vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ":t") or "búfer"
-  append(state.chat_buf, { "  Editado: " .. name })
-  workspace().refresh()
+  return n, created
 end
 
 local function on_reply(decoded)
+  stop_spinner()
   state.busy = false
   state.last = decoded
   local text = decoded.message or "(sin texto)"
+  local patches = decoded.patches or {}
+  local files = patches.files or {}
+  local has_files = #files > 0
+  local has_edits = #(patches.replaces or {}) > 0 or #(patches.diffs or {}) > 0
+
+  if has_files then
+    -- Escribir ya: el usuario no debe pegar código a mano.
+    local n, created = apply_last()
+    if n > 0 and #created > 0 then
+      text = text
+        .. "\n\n✓ Creado en el proyecto: "
+        .. table.concat(created, ", ")
+    elseif n == 0 then
+      text = text .. "\n\n(No se pudo escribir el archivo en el proyecto.)"
+    end
+  end
+
   table.insert(state.turns, { role = "assistant", text = text })
   save_history()
   render_chat()
-  local patches = decoded.patches or {}
-  local has_patch = #(patches.replaces or {}) > 0 or #(patches.diffs or {}) > 0 or #(patches.files or {}) > 0
-  if has_patch then
-    append(state.chat_buf, { "Hay un cambio para el archivo abierto." })
+
+  if has_files then
+    -- ya aplicado arriba
+  elseif has_edits then
+    append(state.chat_buf, { "Hay cambios listos para el proyecto." })
     local yes = auto_write() or vim.fn.confirm("¿Aplicar el cambio de Gla-2 en el proyecto?", "&Sí\n&No", 1) == 1
     if yes then
-      apply_last()
+      local n = apply_last()
+      if n == 0 then
+        append(state.chat_buf, { "  No se aplicó ningún cambio." })
+      else
+        append(state.chat_buf, { "  Cambios aplicados." })
+      end
     else
       append(state.chat_buf, { "  Cambio no aplicado. :Gla2Apply para hacerlo después." })
     end
   end
+end
+
+local function language_from_text(text)
+  local low = (text or ""):lower()
+  if low:find("python", 1, true) or low:find("%.py", 1) then
+    return "python"
+  end
+  if low:find("rust", 1, true) or low:find("cargo", 1, true) then
+    return "rust"
+  end
+  if low:find("lenguaje c", 1, true) or low:find(".c ", 1, true) then
+    return "c"
+  end
+  return nil
+end
+
+local function wants_creation(text)
+  local low = (text or ""):lower()
+  local marks = {
+    "hagamos",
+    "vamos a",
+    "crea ",
+    "crear ",
+    "cree ",
+    "armemos",
+    "armar ",
+    "implementa",
+    "programar",
+    "hazme ",
+    "haz una",
+    "haz un",
+    "quiero una",
+    "quiero un",
+    "necesito una",
+    "necesito un",
+    "calculadora",
+    "desde cero",
+    "nuevo proyecto",
+    "retomemos",
+    "tres archivos",
+    "archivos separados",
+    "ejercicios",
+    "your program",
+    "write a program",
+    "brute-force",
+    "brute force",
+    "sample input",
+    "sample output",
+    "stop processing input",
+    "rewrite small numbers",
+    "enunciado",
+    "resuelve",
+  }
+  for _, mark in ipairs(marks) do
+    if low:find(mark, 1, true) then
+      return true
+    end
+  end
+  if low:find("input", 1, true) and low:find("output", 1, true) and low:find("program", 1, true) then
+    return true
+  end
+  return false
 end
 
 local function send(text)
@@ -433,31 +662,62 @@ local function send(text)
   save_history()
   state.busy = true
   render_chat()
+  start_spinner()
 
-  local extra = workspace().file_index(text)
-  local past = history_context()
-  if past ~= "" then
+  local creating = wants_creation(text)
+  local recall = wants_recall(text)
+  local extra
+  if creating and not recall then
+    -- Contexto mínimo: el árbol + Panel.ps1 hace que el modelo 1.5b copie rutas ajenas.
+    extra = "Proyecto: "
+      .. vim.fn.fnamemodify(root, ":t")
+      .. "\nCrea solo archivos nuevos relativos. No edites archivos existentes."
+  else
+    extra = workspace().file_index(text)
+  end
+  local past = history_context({ recall = recall })
+  -- En "retomemos" / multi-archivo el historial es obligatorio aunque sea creación.
+  if past ~= "" and (not creating or recall) then
     extra = extra .. "\n\n" .. past
   end
-  if buf then
+  if buf and not creating then
     extra = extra .. "\n\n" .. context_from(buf)
   end
   local payload_message = text
   local low = text:lower()
-  local chatty = low:find("hola", 1, true)
-    or low:find("cómo estás", 1, true)
-    or low:find("como estas", 1, true)
-    or low:find("qué tal", 1, true)
-    or low:find("que tal", 1, true)
-    or low:find("gracias", 1, true)
-  if not chatty then
+  local chatty = (
+      low == "hola"
+      or low:match("^hola[%s%p]*$")
+      or low:find("cómo estás", 1, true)
+      or low:find("como estas", 1, true)
+      or low:find("qué tal", 1, true)
+      or low:find("que tal", 1, true)
+      or low:find("gracias", 1, true)
+    )
+    and not creating
+  if creating and recall then
+    payload_message = text
+      .. "\n\nUsa el historial: entrega UN bloque ```file por cada ejercicio/resultado, "
+      .. "con código real completo. Prohibido un solo app/main.py vacío o con pass. "
+      .. "No borres ni reemplaces trabajo bueno con stubs."
+  elseif creating then
+    payload_message = text
+      .. "\n\nPedido de creación: entrega ```file con path relativo nuevo y código completo. "
+      .. "Sin stubs (pass / 'aquí puedes agregar')."
+  elseif not chatty then
     payload_message = text .. "\n\nTrabaja solo dentro del proyecto activo. No toques otras carpetas."
+  end
+  local lang = language_from_text(text)
+  if not creating and not lang and buf then
+    lang = filetype_language(buf)
   end
   local payload = {
     message = payload_message,
-    language = (not chatty and buf) and filetype_language(buf) or nil,
-    path = buf and vim.api.nvim_buf_get_name(buf) or root,
-    diagnostics = (not chatty and buf) and diagnostics_of(buf) or {},
+    language = chatty and nil or lang,
+    path = buf and vim.api.nvim_buf_get_name(buf) or nil,
+    project_root = root,
+    mode = creating and "create" or (chatty and "chat" or "edit"),
+    diagnostics = (not chatty and not creating and buf) and diagnostics_of(buf) or {},
     extra_context = chatty and "" or extra,
     model = require("gla2.models").current(),
   }
@@ -468,6 +728,7 @@ local function send(text)
     text = true,
   }, function(result)
     vim.schedule(function()
+      stop_spinner()
       if not state.chat_buf or not vim.api.nvim_buf_is_valid(state.chat_buf) then
         state.busy = false
         return
@@ -581,6 +842,7 @@ function M.bind_project(path)
   end
   state.root = path
   state.turns = load_history(path)
+  stop_spinner()
   state.busy = false
   render_chat()
 end
@@ -594,7 +856,16 @@ function M.open()
 end
 
 function M.apply_last()
-  apply_last()
+  local n, created = apply_last()
+  if n == 0 then
+    append(state.chat_buf, { "  No se aplicó ningún cambio." })
+  elseif #created > 0 then
+    for _, path in ipairs(created) do
+      append(state.chat_buf, { "  Creado: " .. path })
+    end
+  else
+    append(state.chat_buf, { "  Cambios aplicados." })
+  end
 end
 
 function M.send_text(text, from_range)

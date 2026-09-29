@@ -146,11 +146,17 @@ def _path_from_token(token: str) -> str:
     path = re.split(r"\s+---", path, maxsplit=1)[0].strip()
     if path.endswith("---"):
         path = path[:-3].strip()
+    # Mantener carpetas: calculadora/main.py (no degradar a main.py).
+    if _usable_path(path):
+        return path
+    nested = re.search(
+        r"([A-Za-z_][\w.-]*(?:/[A-Za-z_][\w.-]*)+\.[A-Za-z0-9]+)",
+        path,
+    )
+    if nested and _usable_path(nested.group(1)):
+        return nested.group(1)
     found = re.findall(r"[A-Za-z_][A-Za-z0-9_.-]*\.[A-Za-z0-9]+", path)
-    py = [name for name in found if name.endswith(".py")]
-    if py:
-        return py[-1]
-    if found and " " not in path and "./" not in path:
+    if found and " " not in path and "./" not in path and "/" not in path:
         return found[-1]
     return path
 
@@ -226,9 +232,19 @@ def extract_patches(model_text: str) -> PatchSet:
             files.append(parsed)
 
     if not files:
+        hint = ""
+        hinted = re.search(
+            r"path:\s*([A-Za-z_][\w./-]*\.[A-Za-z0-9]+)",
+            model_text or "",
+            re.IGNORECASE,
+        )
+        if hinted and _usable_path(hinted.group(1).replace("\\", "/")):
+            hint = hinted.group(1).replace("\\", "/")
         py_blocks = _python_bodies(model_text)
         for index, (fence_path, body) in enumerate(py_blocks):
-            if not fence_path and len(py_blocks) == 1 and "# file" not in body.lower():
+            if not fence_path and hint:
+                fence_path = hint
+            elif not fence_path and len(py_blocks) == 1 and "# file" not in body.lower():
                 fence_path = "main.py"
             files.extend(_split_file_comments(body, fence_path))
 

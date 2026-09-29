@@ -67,9 +67,9 @@ def recent_lessons(limit: int = 6) -> str:
         return "(Aún no hay aprendizajes validados.)"
     lines = []
     for row in picked:
-        lines.append(
-            f"- {row.get('style')}: {row.get('request')} → {row.get('note') or 'validó'}"
-        )
+        style = str(row.get("style") or "?")
+        note = str(row.get("note") or "validó")[:120]
+        lines.append(f"- {style}: {note}")
     return "\n".join(lines)
 
 
