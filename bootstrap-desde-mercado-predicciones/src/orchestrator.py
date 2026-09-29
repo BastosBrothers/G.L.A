@@ -7,14 +7,21 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.context import build_system_prompt, build_user_message
+from src.context import build_create_system_prompt, build_system_prompt, build_user_message
 from src.dag import resolve
 from src.deepseek_client import ModelTurn, chat, strip_tool_dumps
 from src.diff import PatchSet, extract_patches
 from src.entregas import recent_for_project
 from src.fs_ops import validate_write_args
-from src.models_route import model_for_mode
-from src.skills import Skill, detect_language, select_skills, strip_skill_directives, wants_skill_authoring
+from src.models_route import create_num_predict, model_for_explain, model_for_mode
+from src.skills import (
+    Skill,
+    detect_language,
+    get_skill,
+    select_skills,
+    strip_skill_directives,
+    wants_skill_authoring,
+)
 from src.text import scrub
 from src.tools import SELF_TOOLS, WRITE_TOOLS, call_tool, openai_tools
 
@@ -364,13 +371,22 @@ def run(
         mode = "chat"
     elif create:
         mode = "create"
-    resolved_model = model_for_mode(mode, explicit=request.model)
+    multi = bool(create and _wants_multi_file(clean))
+    resolved_model = model_for_mode(mode, explicit=request.model, hard=multi)
 
-    system = build_system_prompt(
-        active_skills=[] if talk else graph.ordered,
-        tool_names=[] if (talk or create) else tool_names,
-        language=language,
-    )
+    if create:
+        core = get_skill(f"{language}_core") if language else None
+        system = build_create_system_prompt(
+            language=language,
+            multi=multi,
+            core_skill=core,
+        )
+    else:
+        system = build_system_prompt(
+            active_skills=[] if talk else graph.ordered,
+            tool_names=[] if talk else tool_names,
+            language=language,
+        )
     if talk:
         system += (
             "\n\n## Modo charla\n\n"
@@ -378,25 +394,6 @@ def run(
             "No llames herramientas. No entregues JSON ni bloques ```file. "
             "No inventes skills ni archivos.\n"
         )
-    elif create:
-        multi = _wants_multi_file(clean)
-        system += (
-            "\n\n## Modo creación\n\n"
-            "Contrato fijo:\n"
-            "1) Una o dos frases: qué vas a crear.\n"
-            "2) Bloque(s) ```file con path relativo nuevo y código completo.\n"
-            "3) Cómo ejecutarlo en terminal.\n"
-            "El IDE escribe los archivos: NO digas que el usuario abra el editor "
-            "ni cree archivos a mano.\n"
-            "path nunca absoluto; nunca .ps1/.bat si pidió Python. "
-            "Sin placeholders, sin hello world, sin JSON, sin `pass` de relleno.\n"
-        )
-        if multi:
-            system += (
-                "El usuario pide VARIOS archivos. Entrega un bloque ```file "
-                "distinto por cada ejercicio/resultado. Prohibido fusionarlos "
-                "en un solo app/main.py vacío.\n"
-            )
     suggest = _suggest_create_path(clean, language) if create else None
     user_extra = None if talk else request.extra_context
     if create:
@@ -407,11 +404,14 @@ def run(
         deliveries = recent_for_project(request.project_root or "")
         if deliveries:
             user_extra += "\n\n" + deliveries
-        if _wants_multi_file(clean):
+        if multi:
+            expected = _expected_file_count(clean)
             user_extra += (
-                "\nEntrega varios bloques ```file (uno por ejercicio), "
-                "p.ej. ejercicios/01_....py, ejercicios/02_....py, ejercicios/03_....py. "
-                "Código real del historial. Prohibido un stub único en app/main.py."
+                f"\nEntrega exactamente {expected} bloques ```file "
+                "(uno por archivo), código real correlacionado. "
+                "Imports entre archivos del mismo directorio: "
+                "`from modulo import ...` (sin prefijo de paquete). "
+                "Prohibido un stub único en app/main.py."
             )
         elif suggest:
             user_extra += (
@@ -421,10 +421,7 @@ def run(
                 "Sin cuerpo vacío y sin rutas absolutas."
             )
     messages: list[dict[str, Any]] = [
-        {
-            "role": "system",
-            "content": system,
-        },
+        {"role": "system", "content": system},
         {
             "role": "user",
             "content": build_user_message(
@@ -438,7 +435,7 @@ def run(
     tools = [] if (talk or create) else openai_tools(tool_names)
     trace: list[ToolTrace] = []
     final = ModelTurn(content="")
-    predict = 1400 if create else None
+    predict = create_num_predict(multi=multi) if create else None
 
     for round_index in range(max_tool_rounds + 1):
         final = chat(
@@ -450,17 +447,20 @@ def run(
         if not final.tool_calls:
             break
         if talk or create:
-            nudge = (
-                "Responde solo con texto humano. Sin JSON ni herramientas."
-                if talk
-                else (
+            if talk:
+                nudge = "Responde solo con texto humano. Sin JSON ni herramientas."
+            elif multi:
+                nudge = (
+                    f"Entrega {_expected_file_count(clean)} bloques ```file "
+                    "distintos con código completo. Sin JSON."
+                )
+            else:
+                nudge = (
                     f"Entrega el programa en ```file con path: {suggest}. "
                     "Código completo. Sin JSON ni rutas absolutas."
                 )
-            )
             final = chat(
-                messages
-                + [{"role": "user", "content": nudge}],
+                messages + [{"role": "user", "content": nudge}],
                 tools=None,
                 model=resolved_model,
                 num_predict=predict,
@@ -491,28 +491,10 @@ def run(
     if talk and (not text or text.startswith("{")):
         text = "Hola. Estoy bien, listo para ayudarte a programar. ¿Qué quieres hacer?"
     if create and (
-        _looks_like_demo_echo(text) or not _create_output_ok(text, language, suggest)
+        _looks_like_demo_echo(text)
+        or not _create_output_ok(text, language, suggest, user_message=clean)
     ):
-        # Reintento limpio (pase A): prioriza el fence válido.
-        retry_messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Eres Gla-2. Entrega el programa pedido en un bloque ```file "
-                    "con path relativo y código completo y real. "
-                    "Puedes poner una frase breve antes; lo importante es el código."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"{clean}\n\n"
-                    f"Entrega un bloque ```file con path: {suggest} "
-                    "y el código completo debajo de ---. "
-                    "Sin rutas absolutas, sin editar otros archivos, sin placeholders."
-                ),
-            },
-        ]
+        retry_messages = _create_retry_messages(clean, language, suggest, multi=multi)
         final = chat(
             retry_messages,
             tools=None,
@@ -520,29 +502,12 @@ def run(
             num_predict=predict,
         )
         text = strip_tool_dumps(clean_model_text(final.content or ""))
-    # Si se agotaron tools sin texto útil: un pase final sin herramientas.
     if (not talk) and (not text or text.startswith("(")) and (
         final.tool_calls or "límite de rondas" in (text or "")
     ):
         suggest = suggest or _suggest_create_path(clean, language)
         final = chat(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "Eres Gla-2. Sin herramientas. Entrega el programa en "
-                        f"```file con path: {suggest} y código completo."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"{clean}\n\n"
-                        f"Resuelve el problema. Bloque ```file path: {suggest}. "
-                        "Sin JSON ni tools."
-                    ),
-                },
-            ],
+            _create_retry_messages(clean, language, suggest, multi=False),
             tools=None,
             model=resolved_model,
             num_predict=predict or 1400,
@@ -557,9 +522,8 @@ def run(
     patches = None if talk else extract_patches(text)
     if create and suggest and patches and patches.files:
         patches.files = _normalize_create_paths(
-            patches.files, suggest, language, multi=_wants_multi_file(clean)
+            patches.files, suggest, language, multi=multi
         )
-    # Descartar stubs: no aplicar plantillas vacías al proyecto.
     if patches and patches.files:
         real = [f for f in patches.files if not _is_stub_content(f.content or "")]
         dropped = len(patches.files) - len(real)
@@ -571,14 +535,41 @@ def run(
                 "con el historial o pega el código a conservar.)"
             )
 
-    # Pase B (solo create): explicación estable; patches siguen siendo los de A.
+    if create and multi and patches is not None:
+        if not _multi_delivery_ok(patches.files, clean):
+            retry = chat(
+                _create_retry_messages(clean, language, suggest, multi=True),
+                tools=None,
+                model=resolved_model,
+                num_predict=predict,
+            )
+            retry_text = strip_tool_dumps(clean_model_text(retry.content or ""))
+            retry_patches = extract_patches(retry_text)
+            if retry_patches.files:
+                retry_patches.files = [
+                    f
+                    for f in _normalize_create_paths(
+                        retry_patches.files,
+                        suggest or "app/main.py",
+                        language,
+                        multi=True,
+                    )
+                    if not _is_stub_content(f.content or "")
+                ]
+            if _multi_delivery_ok(retry_patches.files, clean):
+                patches = retry_patches
+                text = retry_text
+
+    if create and patches and patches.files:
+        patches.files = _fix_sibling_imports(patches.files)
+
     if create and patches and patches.files:
         text = _explain_create_pass(
             clean,
             code_text=text,
             patches=patches,
             language=language,
-            model=resolved_model,
+            model=model_for_explain(explicit=request.model),
         )
     elif text and _is_manual_tutorial(text) and patches and patches.files:
         text = _format_create_message(
@@ -596,6 +587,121 @@ def run(
     )
 
 
+
+def _expected_file_count(message: str) -> int:
+    low = (message or "").lower()
+    if re.search(r"\b(cuatro|4)\b", low):
+        return 4
+    if re.search(r"\b(tres|3)\b", low):
+        return 3
+    if re.search(r"\b(dos|2)\b", low):
+        return 2
+    if _wants_multi_file(low):
+        return 2
+    return 1
+
+
+def _create_retry_messages(
+    clean: str,
+    language: str | None,
+    suggest: str | None,
+    *,
+    multi: bool,
+) -> list[dict[str, str]]:
+    if multi:
+        n = _expected_file_count(clean)
+        system = (
+            "Eres Gla-2. Entrega EXACTAMENTE varios bloques ```file "
+            "(path relativo + --- + código completo). "
+            "Cada archivo correlacionado. Imports del mismo directorio: "
+            "`from modulo import ...`. Sin stubs ni un solo main vacío."
+        )
+        user = (
+            f"{clean}\n\n"
+            f"Obligatorio: {n} bloques ```file distintos con código real. "
+            "No fusiones todo en app/main.py ni ejercicios/main.py solo."
+        )
+    else:
+        system = (
+            "Eres Gla-2. Entrega el programa pedido en un bloque ```file "
+            "con path relativo y código completo y real. "
+            "Puedes poner una frase breve antes; lo importante es el código."
+        )
+        user = (
+            f"{clean}\n\n"
+            f"Entrega un bloque ```file con path: {suggest or 'app/main.py'} "
+            "y el código completo debajo de ---. "
+            "Sin rutas absolutas, sin editar otros archivos, sin placeholders."
+        )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def _multi_delivery_ok(files: list, user_message: str) -> bool:
+    if not files:
+        return False
+    need = _expected_file_count(user_message)
+    real = [f for f in files if not _is_stub_content(getattr(f, "content", "") or "")]
+    if len(real) < max(2, need):
+        return False
+    # Un solo archivo que importa un paquete inexistente no cuenta como multi.
+    if len(real) == 1:
+        body = (real[0].content or "").lower()
+        if "import " in body and "from " in body:
+            return False
+    return True
+
+
+def _fix_sibling_imports(files: list) -> list:
+    """from paquete.mod → from mod si ambos viven en paquete/."""
+    by_parent: dict[str, set[str]] = {}
+    for item in files:
+        path = (item.path or "").replace("\\", "/")
+        if "/" not in path:
+            continue
+        parent, name = path.rsplit("/", 1)
+        stem = name.rsplit(".", 1)[0]
+        by_parent.setdefault(parent, set()).add(stem)
+
+    for item in files:
+        path = (item.path or "").replace("\\", "/")
+        if "/" not in path or not item.content:
+            continue
+        parent = path.rsplit("/", 1)[0]
+        pkg = parent.split("/")[-1]
+        siblings = by_parent.get(parent) or set()
+        content = item.content
+        for stem in siblings:
+            # from notas.ops import X  → from ops import X
+            content = re.sub(
+                rf"\bfrom\s+{re.escape(pkg)}\.{re.escape(stem)}\s+import\b",
+                f"from {stem} import",
+                content,
+            )
+            content = re.sub(
+                rf"\bimport\s+{re.escape(pkg)}\.{re.escape(stem)}\b",
+                f"import {stem}",
+                content,
+            )
+        item.content = content
+    return files
+
+
+def _run_hint_for_paths(paths: list[str], language: str | None) -> str:
+    if not paths:
+        return "python main.py"
+    lang = language or "python"
+    if lang == "rust":
+        return "cargo run"
+    if lang == "c":
+        return "compila y ejecuta el binario"
+    mains = [p for p in paths if p.replace("\\", "/").endswith("main.py")]
+    target = mains[0] if mains else paths[0]
+    return f"python {target}"
+
+
 def _explain_create_pass(
     user_request: str,
     *,
@@ -608,11 +714,7 @@ def _explain_create_pass(
     _ = code_text  # el fence visible se reconstruye desde patches
     paths = [item.path for item in patches.files if item.path]
     path_list = ", ".join(f"`{p}`" for p in paths) or "`(archivo)`"
-    run_hint = {
-        "python": f"python {paths[0]}" if paths else "python main.py",
-        "rust": "cargo run",
-        "c": "compila y ejecuta el binario",
-    }.get((language or "python"), f"ejecuta {paths[0]}" if paths else "ejecuta el programa")
+    run_hint = _run_hint_for_paths(paths, language)
 
     explain = chat(
         [
@@ -638,7 +740,7 @@ def _explain_create_pass(
         ],
         tools=None,
         model=model,
-        num_predict=220,
+        num_predict=160,
     )
     prose = strip_tool_dumps(clean_model_text(explain.content or "")).strip()
     if (
@@ -744,7 +846,11 @@ def _is_stub_content(content: str) -> bool:
     compact = re.sub(r"\s+", " ", low)
     if "def main(" in compact and " pass" in compact and len(compact) < 180:
         return True
-    if len(re.sub(r"\s", "", content or "")) < 40:
+    compact_nospace = re.sub(r"\s", "", content or "")
+    if len(compact_nospace) < 40:
+        # Funciones cortas reales (return / print) no son stub.
+        if "return" in low or "print(" in low or "input(" in low:
+            return False
         return True
     return False
 
@@ -752,8 +858,19 @@ def _is_stub_content(content: str) -> bool:
 def _suggest_create_path(message: str, language: str | None) -> str:
     low = (message or "").lower()
     ext = {"python": "py", "rust": "rs", "c": "c"}.get((language or "python"), "py")
+    # Si el usuario ya dio un path concreto, úsalo.
+    explicit = re.search(
+        rf"([a-z0-9_\-]+(?:/[a-z0-9_\-]+)+\.{ext})",
+        low,
+    )
+    if explicit and not _wants_multi_file(low):
+        return explicit.group(1)
     if _wants_multi_file(low):
-        return f"ejercicios/01_main.{ext}"
+        # Preferir carpeta nombrada (notas/, tienda/, calc_mod/) si aparece.
+        folder = re.search(r"\b([a-z][a-z0-9_]{1,24})/", low)
+        if folder and folder.group(1) not in {"app", "src", "path"}:
+            return f"{folder.group(1)}/main.{ext}"
+        return f"proyecto/main.{ext}"
     for word, folder in (
         ("calculadora", "calculadora"),
         ("calculator", "calculadora"),
@@ -766,6 +883,9 @@ def _suggest_create_path(message: str, language: str | None) -> str:
         ("api", "api"),
         ("bot", "bot"),
         ("script", "script"),
+        ("hola", "hola_nombre"),
+        ("suma", "suma_dos"),
+        ("tabla", "tabla_5"),
     ):
         if word in low:
             return f"{folder}/main.{ext}"
@@ -773,7 +893,11 @@ def _suggest_create_path(message: str, language: str | None) -> str:
 
 
 def _create_output_ok(
-    text: str, language: str | None, suggest: str | None
+    text: str,
+    language: str | None,
+    suggest: str | None,
+    *,
+    user_message: str | None = None,
 ) -> bool:
     patches = extract_patches(text or "")
     if not patches.files:
@@ -783,7 +907,8 @@ def _create_output_ok(
         "rust": ".rs",
         "c": ".c",
     }.get((language or "python"), ".py")
-    multi = _wants_multi_file(text or "")
+    probe = user_message if user_message is not None else text
+    multi = _wants_multi_file(probe or "")
     if multi and len(patches.files) < 2:
         return False
     for item in patches.files:

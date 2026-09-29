@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
-from src.models_route import model_for_mode
+from src.models_route import create_num_predict, model_for_explain, model_for_mode
 from src.orchestrator import (
     _create_output_ok,
+    _expected_file_count,
+    _fix_sibling_imports,
     _is_manual_tutorial,
     _is_stub_content,
     _looks_like_demo_echo,
+    _multi_delivery_ok,
     _wants_multi_file,
     wants_code_creation,
 )
@@ -33,6 +37,8 @@ def run_checks() -> list[str]:
     multi = "retomemos los tres ejercicios, hagamos tres archivos separados"
     if not _wants_multi_file(multi):
         errors.append("retomemos/tres archivos debería ser multi")
+    if _expected_file_count(multi) != 3:
+        errors.append("tres archivos → expected 3")
 
     stub = (
         "def main():\n"
@@ -69,16 +75,48 @@ def run_checks() -> list[str]:
     if not _create_output_ok(real, "python", "life/main.py"):
         errors.append("programa life real debería pasar _create_output_ok")
 
-    # Aislar de OLLAMA_MODEL_* del entorno del usuario.
+    multi_one = (
+        "```file\npath: ejercicios/main.py\n---\n"
+        "from tienda import carrito\n"
+        "print(carrito.total([1]))\n"
+        "```"
+    )
+    if _create_output_ok(
+        multi_one,
+        "python",
+        "ejercicios/main.py",
+        user_message="crea tres archivos separados correlacionados",
+    ):
+        errors.append("un solo fence no debería pasar create_ok en multi")
+
+    files = [
+        SimpleNamespace(
+            path="notas/ops.py",
+            content="def sumar(a, b):\n    return a + b\n",
+        ),
+        SimpleNamespace(
+            path="notas/main.py",
+            content="from notas.ops import sumar\nprint(sumar(1, 2))\n",
+        ),
+    ]
+    fixed = _fix_sibling_imports(files)
+    if "from ops import sumar" not in fixed[1].content:
+        errors.append("imports de hermano deberían volverse relativos")
+    if not _multi_delivery_ok(fixed, "dos archivos separados correlacionados"):
+        errors.append("dos archivos reales deberían pasar multi_delivery_ok")
+
     old_create = os.environ.pop("OLLAMA_MODEL_CREATE", None)
     old_chat = os.environ.pop("OLLAMA_MODEL_CHAT", None)
     try:
         create_default = model_for_mode("create", explicit=None)
         if create_default != "qwen2.5-coder:3b":
             errors.append(f"create default esperado qwen2.5-coder:3b, got {create_default}")
-        create_from_light = model_for_mode("create", explicit="gla-2")
-        if create_from_light != "qwen2.5-coder:3b":
-            errors.append("create con gla-2 explícito debería escalar a coder:3b")
+        if model_for_explain() != "gla-2":
+            errors.append("explain debería usar gla-2")
+        if create_num_predict(multi=False) < 100:
+            errors.append("predict create demasiado bajo")
+        if create_num_predict(multi=True) <= create_num_predict(multi=False):
+            errors.append("predict multi debería ser mayor que simple")
         chat_default = model_for_mode("chat", explicit=None)
         if chat_default != "gla-2":
             errors.append(f"chat default esperado gla-2, got {chat_default}")

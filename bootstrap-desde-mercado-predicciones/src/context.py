@@ -98,6 +98,28 @@ def _read_text(path, empty_msg: str) -> str:
     return text if text else empty_msg
 
 
+CREATE_SYSTEM_SLIM = """Eres Gla-2: programas en local. Español en prosa; código en su idioma.
+Preséntate solo como Gla-2. No inventes APIs. Sin hello world ni stubs (`pass` de relleno).
+
+Contrato de creación (obligatorio):
+1) Una o dos frases: qué vas a crear.
+2) Bloque(s) ```file con path relativo nuevo y código completo y real.
+3) Cómo ejecutarlo en terminal.
+El IDE escribe los archivos: NO digas que el usuario abra el editor ni pegue código.
+
+Estructura de cada bloque:
+```file
+path: carpeta/archivo.ext
+---
+codigo completo
+```
+
+Varios archivos: un bloque ```file distinto por cada archivo. Imports entre módulos
+del mismo paquete: `from ops import ...` (mismo directorio), no `from paquete.ops`.
+path nunca absoluto; nunca .ps1/.bat si pidieron Python.
+"""
+
+
 def build_system_prompt(
     *,
     active_skills: list[Skill],
@@ -126,6 +148,35 @@ def build_system_prompt(
         f"## Pesos propios de Gla-2 (R1 no se entrena)\n\n{resumen_pesos()}\n\n"
         f"## Aprendizajes de sandbox (solo formas que validaron)\n\n{recent_lessons()}\n"
     )
+
+
+def build_create_system_prompt(
+    *,
+    language: str | None = None,
+    multi: bool = False,
+    core_skill: Skill | None = None,
+) -> str:
+    """System corto para create: menos tokens, más foco en el contrato ```file."""
+    lang = language or "python"
+    parts = [
+        CREATE_SYSTEM_SLIM.strip(),
+        f"## Leyes (resumen)\n\n{laws_block()}",
+        f"## Lenguaje\n\n{lang}",
+    ]
+    if core_skill and (core_skill.body or "").strip():
+        body = core_skill.body.strip()
+        if len(body) > 1200:
+            body = body[:1200] + "\n…"
+        parts.append(f"## Skill `{core_skill.name}`\n\n{body}")
+    if multi:
+        parts.append(
+            "## Multi-archivo\n\n"
+            "El usuario pide VARIOS archivos correlacionados. "
+            "Entrega un bloque ```file por cada uno, con código real. "
+            "Prohibido un solo app/main.py o ejercicios/main.py vacío que importe "
+            "módulos que no entregaste."
+        )
+    return "\n\n".join(parts)
 
 
 def build_user_message(

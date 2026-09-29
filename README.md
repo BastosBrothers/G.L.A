@@ -189,6 +189,16 @@ Otros ejemplos:
 
 Cuando varias snapshots de una línea se consideran estables, sube la **versión** (p. ej. de `2.0` a `2.1`) y las snapshots nuevas llevan ya ese número.
 
+### Dónde vive cada cosa (ramas)
+
+| Rama | Qué lleva |
+|------|-----------|
+| **`main`** | Solo la **versión V más nueva** ya estable (p. ej. el código de G.L.A. 2.0 cuando esa sea la última). No se hace push de snapshots a `main`. |
+| **`v2.0`**, **`v2.1`**, … | Línea de una versión concreta mientras se trabaja o se conserva. |
+| **`A…` / `B…` / `C…` / `X…`** | Snapshots intermedias (p. ej. `X2809262.0`). Quedan en su propia rama hasta estabilizarse. |
+
+Recordatorio: **a `main` va únicamente la versión V más reciente.** Las snapshots y el trabajo en curso van a ramas `A`/`B`/`C`/`X` o `v…`, no a `main`.
+
 ---
 
 ## Documentación adicional
@@ -196,6 +206,7 @@ Cuando varias snapshots de una línea se consideran estables, sube la **versión
 - [`NOTA-DESEMPENO.md`](NOTA-DESEMPENO.md) — criterios de evolución del motor
 - [`bootstrap-desde-mercado-predicciones/ORIGEN.md`](bootstrap-desde-mercado-predicciones/ORIGEN.md) — origen del motor
 - [`bootstrap-desde-mercado-predicciones/specs/`](bootstrap-desde-mercado-predicciones/specs/) — orquestador, skills, protocolos
+- [`bootstrap-desde-mercado-predicciones/specs/ingenieria-prompt.md`](bootstrap-desde-mercado-predicciones/specs/ingenieria-prompt.md) — desglose de la ingeniería de prompt
 
 ---
 
