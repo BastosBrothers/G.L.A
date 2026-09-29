@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from types import SimpleNamespace
 
+from src.diff import extract_patches
 from src.models_route import create_num_predict, model_for_explain, model_for_mode
 from src.orchestrator import (
     _create_output_ok,
@@ -104,6 +105,40 @@ def run_checks() -> list[str]:
         errors.append("imports de hermano deberían volverse relativos")
     if not _multi_delivery_ok(fixed, "dos archivos separados correlacionados"):
         errors.append("dos archivos reales deberían pasar multi_delivery_ok")
+
+    # Fence roto típico: ```file con solo el path + código en ```python.
+    broken = (
+        "Voy a crear la lista.\n"
+        "```file\n"
+        "tareas/store.py\n"
+        "```\n"
+        "```python\n"
+        "import json\n"
+        "def cargar():\n"
+        "    return []\n"
+        "def guardar(lista):\n"
+        "    pass\n"
+        "```\n"
+        "```file\n"
+        "tareas/main.py\n"
+        "```\n"
+        "```python\n"
+        "from store import cargar, guardar\n"
+        "def main():\n"
+        "    print(cargar())\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n"
+        "```\n"
+    )
+    recovered = extract_patches(broken).files
+    if len(recovered) < 2:
+        errors.append(f"fence file+python debería recuperar 2 archivos, got {len(recovered)}")
+    else:
+        paths = {item.path.replace('\\', '/') for item in recovered}
+        if "tareas/store.py" not in paths or "tareas/main.py" not in paths:
+            errors.append(f"paths recuperados incorrectos: {paths}")
+        if "def cargar" not in (recovered[0].content + recovered[1].content):
+            errors.append("código python no se emparejó al path")
 
     old_create = os.environ.pop("OLLAMA_MODEL_CREATE", None)
     old_chat = os.environ.pop("OLLAMA_MODEL_CHAT", None)

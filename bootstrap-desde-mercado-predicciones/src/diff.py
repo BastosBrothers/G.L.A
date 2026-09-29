@@ -195,13 +195,81 @@ def parse_file_block(raw: str, fence_path: str = "") -> NewFile | str:
         candidate = _path_from_token(first)
         if _usable_path(candidate):
             path = candidate
-            content = rest or text
+            # No reutilizar la línea del path como "código".
+            content = rest
     content = re.sub(r"\n---[ \t]*$", "", content.rstrip())
     if not _usable_path(path):
         return "Bloque file con path inválido."
     if not content.strip():
         return "Bloque file sin código."
+    # Path repetido como único contenido → inválido (fence vacío mal cerrado).
+    if _path_from_token(content.strip()) == path.replace("\\", "/"):
+        return "Bloque file sin código."
     return NewFile(path=path, content=content.rstrip("\n") + "\n")
+
+
+def _file_paths_declared(model_text: str) -> list[str]:
+    """Paths anunciados en fences ```file aunque el cuerpo esté vacío."""
+    paths: list[str] = []
+    for match in FILE_FENCE_RE.finditer(model_text or ""):
+        fence_path = match.group(1) or ""
+        body = (match.group(2) or "").strip()
+        candidate = _path_from_token(fence_path)
+        if not _usable_path(candidate):
+            for line in body.splitlines()[:3]:
+                candidate = _path_from_token(line)
+                if _usable_path(candidate):
+                    break
+        if _usable_path(candidate) and candidate not in paths:
+            paths.append(candidate)
+    # También "path: foo.py" sueltos en prosa.
+    for match in re.finditer(
+        r"path:\s*([A-Za-z_][\w./-]*\.[A-Za-z0-9]+)",
+        model_text or "",
+        re.IGNORECASE,
+    ):
+        candidate = match.group(1).replace("\\", "/")
+        if _usable_path(candidate) and candidate not in paths:
+            paths.append(candidate)
+    return paths
+
+
+def _pair_paths_with_python(model_text: str) -> list[NewFile]:
+    """Empareja paths de ```file vacíos con bloques ```python siguientes.
+
+    Patrón típico del modelo chico:
+    ```file
+    tareas/store.py
+    ```
+    ```python
+    def cargar(): ...
+    ```
+    """
+    paths = _file_paths_declared(model_text)
+    py_blocks = _python_bodies(model_text)
+    if not paths or not py_blocks:
+        return []
+    files: list[NewFile] = []
+    for index, (fence_path, body) in enumerate(py_blocks):
+        content = (body or "").strip()
+        if not content:
+            continue
+        # Ignorar python que solo repite un path.
+        if _usable_path(_path_from_token(content.splitlines()[0])):
+            if len(content.splitlines()) <= 1:
+                continue
+        path = _path_from_token(fence_path) if fence_path else ""
+        if not _usable_path(path):
+            path = paths[index] if index < len(paths) else (paths[-1] if paths else "")
+        if not _usable_path(path):
+            continue
+        # Preferir cuerpos con # file: dentro del python.
+        named = _split_file_comments(body, path)
+        if named:
+            files.extend(named)
+        else:
+            files.append(NewFile(path=path, content=content.rstrip("\n") + "\n"))
+    return files
 
 
 def extract_patches(model_text: str) -> PatchSet:
@@ -231,7 +299,17 @@ def extract_patches(model_text: str) -> PatchSet:
         else:
             files.append(parsed)
 
-    if not files:
+    # Si no hay files útiles, o solo paths vacíos fallaron: recuperar ```python.
+    useful = [f for f in files if (f.content or "").strip()]
+    if len(useful) < max(1, len(_file_paths_declared(model_text))):
+        recovered = _pair_paths_with_python(model_text)
+        if recovered:
+            # Sustituye si recuperamos más o igual cantidad con cuerpo real.
+            if len(recovered) >= len(useful):
+                files = recovered
+                useful = recovered
+
+    if not useful:
         hint = ""
         hinted = re.search(
             r"path:\s*([A-Za-z_][\w./-]*\.[A-Za-z0-9]+)",
