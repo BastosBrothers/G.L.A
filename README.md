@@ -195,7 +195,7 @@ Cuando varias snapshots de una línea se consideran estables, sube la **versión
 | Rama | Qué corrigió / aportó |
 |------|------------------------|
 | **`X2809262.0`** | Paquete mixto: routing chat/create, diario de entregas, undo/run/aprender, tests IDE, esquema de versiones en README |
-| **`A2909262.0`** | Motor más ágil e inteligente en create: system slim, pase B con modelo ligero, critic multi-archivo + retry, imports entre hermanos relativos, predict por modo, menos anclaje a `app/main.py`; **recupera fences ```file rotos** (path solo + código en ```python) |
+| **`A2909262.0`** | Motor más ágil e inteligente en create: system slim, pase B con modelo ligero, critic multi-archivo + retry, imports entre hermanos relativos, predict por modo, menos anclaje a `app/main.py`; **recupera fences ```file rotos**; **create secuencial para 3+ archivos** correlacionados |
 
 ### Dónde vive cada cosa (ramas)
 

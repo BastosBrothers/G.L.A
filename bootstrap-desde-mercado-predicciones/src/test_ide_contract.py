@@ -15,6 +15,7 @@ from src.orchestrator import (
     _is_stub_content,
     _looks_like_demo_echo,
     _multi_delivery_ok,
+    _paths_from_request,
     _wants_multi_file,
     wants_code_creation,
 )
@@ -40,6 +41,15 @@ def run_checks() -> list[str]:
         errors.append("retomemos/tres archivos debería ser multi")
     if _expected_file_count(multi) != 3:
         errors.append("tres archivos → expected 3")
+
+    three_paths = (
+        "crea tres archivos: tienda/precios.py, tienda/carrito.py y tienda/main.py"
+    )
+    got_paths = _paths_from_request(three_paths, "python")
+    if got_paths != ["tienda/precios.py", "tienda/carrito.py", "tienda/main.py"]:
+        errors.append(f"paths_from_request falló: {got_paths}")
+    if _expected_file_count(three_paths) != 3:
+        errors.append("3 paths explícitos → expected 3")
 
     stub = (
         "def main():\n"

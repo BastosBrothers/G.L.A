@@ -10,7 +10,7 @@ from typing import Any
 from src.context import build_create_system_prompt, build_system_prompt, build_user_message
 from src.dag import resolve
 from src.deepseek_client import ModelTurn, chat, strip_tool_dumps
-from src.diff import PatchSet, extract_patches
+from src.diff import NewFile, PatchSet, extract_patches
 from src.entregas import recent_for_project
 from src.fs_ops import validate_write_args
 from src.models_route import create_num_predict, model_for_explain, model_for_mode
@@ -406,12 +406,17 @@ def run(
             user_extra += "\n\n" + deliveries
         if multi:
             expected = _expected_file_count(clean)
+            declared = _paths_from_request(clean, language)
+            path_hint = ""
+            if declared:
+                path_hint = " Paths exactos:\n" + "\n".join(f"- {p}" for p in declared)
             user_extra += (
                 f"\nEntrega exactamente {expected} bloques ```file "
                 "(uno por archivo), código real correlacionado. "
                 "Imports entre archivos del mismo directorio: "
                 "`from modulo import ...` (sin prefijo de paquete). "
                 "Prohibido un stub único en app/main.py."
+                f"{path_hint}"
             )
         elif suggest:
             user_extra += (
@@ -436,129 +441,169 @@ def run(
     trace: list[ToolTrace] = []
     final = ModelTurn(content="")
     predict = create_num_predict(multi=multi) if create else None
+    text = ""
+    patches: PatchSet | None = None
 
-    for round_index in range(max_tool_rounds + 1):
-        final = chat(
-            messages,
-            tools=tools or None,
-            model=resolved_model,
-            num_predict=predict,
+    # 3+ archivos: el 3b colapsa en un solo main → create secuencial de entrada.
+    if create and multi and _expected_file_count(clean) >= 3:
+        targets = _paths_from_request(clean, language) or _default_multi_paths(
+            clean, language, _expected_file_count(clean)
         )
-        if not final.tool_calls:
-            break
-        if talk or create:
-            if talk:
-                nudge = "Responde solo con texto humano. Sin JSON ni herramientas."
-            elif multi:
-                nudge = (
-                    f"Entrega {_expected_file_count(clean)} bloques ```file "
-                    "distintos con código completo. Sin JSON."
-                )
-            else:
-                nudge = (
-                    f"Entrega el programa en ```file con path: {suggest}. "
-                    "Código completo. Sin JSON ni rutas absolutas."
-                )
+        patches = _create_files_sequential(
+            clean,
+            language=language,
+            paths=targets,
+            model=resolved_model,
+        )
+        text = (
+            f"Creé {len(patches.files)} archivos correlacionados "
+            f"({', '.join(f.path for f in patches.files)})."
+        )
+    else:
+        for round_index in range(max_tool_rounds + 1):
             final = chat(
-                messages + [{"role": "user", "content": nudge}],
-                tools=None,
+                messages,
+                tools=tools or None,
                 model=resolved_model,
                 num_predict=predict,
             )
-            break
-        if round_index >= max_tool_rounds:
-            break
-        messages.append(_assistant_message(final))
-        for call in final.tool_calls:
-            if call.name in WRITE_TOOLS:
-                invalid = validate_write_args(call.name, call.arguments)
-                if invalid:
-                    result = invalid
-                elif confirm_write is None or not confirm_write(
-                    call.name, call.arguments
-                ):
-                    result = "El usuario no confirmó. No se creó ni se modificó nada."
+            if not final.tool_calls:
+                break
+            if talk or create:
+                if talk:
+                    nudge = "Responde solo con texto humano. Sin JSON ni herramientas."
+                elif multi:
+                    nudge = (
+                        f"Entrega {_expected_file_count(clean)} bloques ```file "
+                        "distintos con código completo. Sin JSON."
+                    )
+                else:
+                    nudge = (
+                        f"Entrega el programa en ```file con path: {suggest}. "
+                        "Código completo. Sin JSON ni rutas absolutas."
+                    )
+                final = chat(
+                    messages + [{"role": "user", "content": nudge}],
+                    tools=None,
+                    model=resolved_model,
+                    num_predict=predict,
+                )
+                break
+            if round_index >= max_tool_rounds:
+                break
+            messages.append(_assistant_message(final))
+            for call in final.tool_calls:
+                if call.name in WRITE_TOOLS:
+                    invalid = validate_write_args(call.name, call.arguments)
+                    if invalid:
+                        result = invalid
+                    elif confirm_write is None or not confirm_write(
+                        call.name, call.arguments
+                    ):
+                        result = "El usuario no confirmó. No se creó ni se modificó nada."
+                    else:
+                        result = call_tool(call.name, call.arguments)
                 else:
                     result = call_tool(call.name, call.arguments)
-            else:
-                result = call_tool(call.name, call.arguments)
-            trace.append(
-                ToolTrace(name=call.name, arguments=call.arguments, result=result)
-            )
-            messages.append(_tool_result_message(call.name, call.id, result))
+                trace.append(
+                    ToolTrace(name=call.name, arguments=call.arguments, result=result)
+                )
+                messages.append(_tool_result_message(call.name, call.id, result))
 
-    text = strip_tool_dumps(clean_model_text(final.content or ""))
-    if talk and (not text or text.startswith("{")):
-        text = "Hola. Estoy bien, listo para ayudarte a programar. ¿Qué quieres hacer?"
-    if create and (
-        _looks_like_demo_echo(text)
-        or not _create_output_ok(text, language, suggest, user_message=clean)
-    ):
-        retry_messages = _create_retry_messages(clean, language, suggest, multi=multi)
-        final = chat(
-            retry_messages,
-            tools=None,
-            model=resolved_model,
-            num_predict=predict,
-        )
         text = strip_tool_dumps(clean_model_text(final.content or ""))
-    if (not talk) and (not text or text.startswith("(")) and (
-        final.tool_calls or "límite de rondas" in (text or "")
-    ):
-        suggest = suggest or _suggest_create_path(clean, language)
-        final = chat(
-            _create_retry_messages(clean, language, suggest, multi=False),
-            tools=None,
-            model=resolved_model,
-            num_predict=predict or 1400,
-        )
-        text = strip_tool_dumps(clean_model_text(final.content or ""))
-        create = True
-    if final.tool_calls and not text and not talk:
-        text = (
-            "No pude terminar con herramientas. "
-            "Reintenta el pedido o pide: crea el programa en un archivo Python."
-        )
-    patches = None if talk else extract_patches(text)
-    if create and suggest and patches and patches.files:
-        patches.files = _normalize_create_paths(
-            patches.files, suggest, language, multi=multi
-        )
-    if patches and patches.files:
-        real = [f for f in patches.files if not _is_stub_content(f.content or "")]
-        dropped = len(patches.files) - len(real)
-        patches.files = real
-        if dropped and not real and create:
-            text = (
-                (text or "").rstrip()
-                + "\n\n(No apliqué stubs vacíos. Vuelve a pedir los ejercicios "
-                "con el historial o pega el código a conservar.)"
+        if talk and (not text or text.startswith("{")):
+            text = "Hola. Estoy bien, listo para ayudarte a programar. ¿Qué quieres hacer?"
+        if create and (
+            _looks_like_demo_echo(text)
+            or not _create_output_ok(text, language, suggest, user_message=clean)
+        ):
+            retry_messages = _create_retry_messages(
+                clean, language, suggest, multi=multi
             )
-
-    if create and multi and patches is not None:
-        if not _multi_delivery_ok(patches.files, clean):
-            retry = chat(
-                _create_retry_messages(clean, language, suggest, multi=True),
+            final = chat(
+                retry_messages,
                 tools=None,
                 model=resolved_model,
                 num_predict=predict,
             )
-            retry_text = strip_tool_dumps(clean_model_text(retry.content or ""))
-            retry_patches = extract_patches(retry_text)
-            if retry_patches.files:
-                retry_patches.files = [
-                    f
-                    for f in _normalize_create_paths(
-                        retry_patches.files,
-                        suggest or "app/main.py",
-                        language,
-                        multi=True,
+            text = strip_tool_dumps(clean_model_text(final.content or ""))
+        if (not talk) and (not text or text.startswith("(")) and (
+            final.tool_calls or "límite de rondas" in (text or "")
+        ):
+            suggest = suggest or _suggest_create_path(clean, language)
+            final = chat(
+                _create_retry_messages(clean, language, suggest, multi=False),
+                tools=None,
+                model=resolved_model,
+                num_predict=predict or 1400,
+            )
+            text = strip_tool_dumps(clean_model_text(final.content or ""))
+            create = True
+        if final.tool_calls and not text and not talk:
+            text = (
+                "No pude terminar con herramientas. "
+                "Reintenta el pedido o pide: crea el programa en un archivo Python."
+            )
+        patches = None if talk else extract_patches(text)
+        if create and suggest and patches and patches.files:
+            patches.files = _normalize_create_paths(
+                patches.files, suggest, language, multi=multi
+            )
+        if patches and patches.files:
+            real = [f for f in patches.files if not _is_stub_content(f.content or "")]
+            dropped = len(patches.files) - len(real)
+            patches.files = real
+            if dropped and not real and create:
+                text = (
+                    (text or "").rstrip()
+                    + "\n\n(No apliqué stubs vacíos. Vuelve a pedir los ejercicios "
+                    "con el historial o pega el código a conservar.)"
+                )
+
+        if create and multi and patches is not None:
+            need = _expected_file_count(clean)
+            declared = _paths_from_request(clean, language)
+            if not _multi_delivery_ok(patches.files, clean):
+                if need < 3:
+                    retry = chat(
+                        _create_retry_messages(clean, language, suggest, multi=True),
+                        tools=None,
+                        model=resolved_model,
+                        num_predict=predict,
                     )
-                    if not _is_stub_content(f.content or "")
-                ]
-            if _multi_delivery_ok(retry_patches.files, clean):
-                patches = retry_patches
-                text = retry_text
+                    retry_text = strip_tool_dumps(clean_model_text(retry.content or ""))
+                    retry_patches = extract_patches(retry_text)
+                    if retry_patches.files:
+                        retry_patches.files = [
+                            f
+                            for f in _normalize_create_paths(
+                                retry_patches.files,
+                                suggest or "app/main.py",
+                                language,
+                                multi=True,
+                            )
+                            if not _is_stub_content(f.content or "")
+                        ]
+                    if _multi_delivery_ok(retry_patches.files, clean):
+                        patches = retry_patches
+                        text = retry_text
+                if not _multi_delivery_ok(patches.files, clean):
+                    targets = declared or _default_multi_paths(clean, language, need)
+                    if len(targets) >= 2:
+                        seq = _create_files_sequential(
+                            clean,
+                            language=language,
+                            paths=targets,
+                            model=resolved_model,
+                        )
+                        if len(seq.files) >= max(2, need) or _multi_delivery_ok(
+                            seq.files, clean
+                        ):
+                            patches = seq
+                            text = (
+                                f"Creé {len(seq.files)} archivos correlacionados "
+                                f"({', '.join(f.path for f in seq.files)})."
+                            )
 
     if create and patches and patches.files:
         patches.files = _fix_sibling_imports(patches.files)
@@ -589,6 +634,9 @@ def run(
 
 
 def _expected_file_count(message: str) -> int:
+    declared = _paths_from_request(message, None)
+    if len(declared) >= 2:
+        return len(declared)
     low = (message or "").lower()
     if re.search(r"\b(cuatro|4)\b", low):
         return 4
@@ -601,6 +649,132 @@ def _expected_file_count(message: str) -> int:
     return 1
 
 
+def _paths_from_request(message: str, language: str | None) -> list[str]:
+    """Paths explícitos del pedido (p. ej. tienda/precios.py)."""
+    ext = {"python": "py", "rust": "rs", "c": "c"}.get((language or "python"), "py")
+    found: list[str] = []
+    for match in re.finditer(
+        rf"([A-Za-z_][\w.-]*(?:/[A-Za-z_][\w.-]*)+\.{ext})",
+        message or "",
+        re.IGNORECASE,
+    ):
+        path = match.group(1).replace("\\", "/")
+        low = path.lower()
+        if low not in {p.lower() for p in found}:
+            found.append(path)
+    return found[:8]
+
+
+def _default_multi_paths(message: str, language: str | None, need: int) -> list[str]:
+    ext = {"python": "py", "rust": "rs", "c": "c"}.get((language or "python"), "py")
+    low = (message or "").lower()
+    folder = "proyecto"
+    for word in ("tienda", "notas", "tareas", "calc", "juego", "api", "bot"):
+        if word in low:
+            folder = word
+            break
+    named = re.search(r"\b([a-z][a-z0-9_]{2,20})/", low)
+    if named and named.group(1) not in {"app", "src", "path", "http", "https"}:
+        folder = named.group(1)
+    if need <= 2:
+        return [f"{folder}/ops.{ext}", f"{folder}/main.{ext}"]
+    if need == 3:
+        return [
+            f"{folder}/mod_a.{ext}",
+            f"{folder}/mod_b.{ext}",
+            f"{folder}/main.{ext}",
+        ]
+    return [f"{folder}/mod_{i}.{ext}" for i in range(1, need)] + [f"{folder}/main.{ext}"]
+
+
+def _create_files_sequential(
+    clean: str,
+    *,
+    language: str | None,
+    paths: list[str],
+    model: str | None,
+) -> PatchSet:
+    """Crea un ```file por llamada. Más lento, mucho más fiable con 3b."""
+    files: list[NewFile] = []
+    prior: list[str] = []
+    lang = language or "python"
+    for path in paths:
+        prior_block = ""
+        if prior:
+            prior_block = (
+                "Archivos ya creados (no los reescribas; impórtalos si hace falta):\n"
+                + "\n".join(prior)
+                + "\n\n"
+            )
+        siblings = [p.rsplit("/", 1)[-1].rsplit(".", 1)[0] for p in paths if p != path]
+        import_hint = ""
+        if siblings:
+            import_hint = (
+                "Si importas un hermano del mismo directorio usa "
+                f"`from {siblings[0]} import ...` (sin prefijo de carpeta).\n"
+            )
+        turn = chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Eres Gla-2. Ahora entregas UN solo archivo. "
+                        "Un bloque ```file con path: exactamente el pedido, "
+                        "línea ---, código completo real. Sin otros archivos. "
+                        "Sin ```python suelto. Sin stubs."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Pedido global:\n{clean}\n\n"
+                        f"{prior_block}"
+                        f"Escribe SOLO este archivo ahora: {path}\n"
+                        f"Lenguaje: {lang}\n"
+                        f"{import_hint}"
+                        "Formato exacto:\n"
+                        f"```file\npath: {path}\n---\n"
+                        "# código completo\n```"
+                    ),
+                },
+            ],
+            tools=None,
+            model=model,
+            num_predict=900,
+        )
+        chunk = strip_tool_dumps(clean_model_text(turn.content or ""))
+        extracted = extract_patches(chunk)
+        chosen: NewFile | None = None
+        for item in extracted.files:
+            if _is_stub_content(item.content or ""):
+                continue
+            item_path = (item.path or "").replace("\\", "/")
+            if item_path == path or item_path.endswith("/" + path.split("/")[-1]):
+                item.path = path
+                chosen = item
+                break
+        if chosen is None:
+            for item in extracted.files:
+                if not _is_stub_content(item.content or ""):
+                    item.path = path
+                    chosen = item
+                    break
+        if chosen is None:
+            # Último recurso: cuerpo dentro de fences file mal formados / python.
+            recovered = extract_patches(chunk).files
+            for item in recovered:
+                if not _is_stub_content(item.content or ""):
+                    item.path = path
+                    chosen = item
+                    break
+        if chosen is not None:
+            files.append(chosen)
+            preview = (chosen.content or "").strip().splitlines()
+            head = "\n".join(preview[:12])
+            prior.append(f"- {path}:\n```\n{head}\n```")
+    return PatchSet(diffs=[], replaces=[], files=files, errors=[])
+
+
 def _create_retry_messages(
     clean: str,
     language: str | None,
@@ -610,6 +784,10 @@ def _create_retry_messages(
 ) -> list[dict[str, str]]:
     if multi:
         n = _expected_file_count(clean)
+        paths = _paths_from_request(clean, language) or _default_multi_paths(
+            clean, language, n
+        )
+        path_lines = "\n".join(f"- {p}" for p in paths)
         system = (
             "Eres Gla-2. Entrega EXACTAMENTE varios bloques ```file "
             "(path relativo + --- + código completo). "
@@ -618,7 +796,8 @@ def _create_retry_messages(
         )
         user = (
             f"{clean}\n\n"
-            f"Obligatorio: {n} bloques ```file distintos con código real. "
+            f"Obligatorio: {len(paths)} bloques ```file distintos con código real.\n"
+            f"Paths exactos:\n{path_lines}\n"
             "No fusiones todo en app/main.py ni ejercicios/main.py solo."
         )
     else:
@@ -650,6 +829,13 @@ def _multi_delivery_ok(files: list, user_message: str) -> bool:
     if len(real) == 1:
         body = (real[0].content or "").lower()
         if "import " in body and "from " in body:
+            return False
+    declared = _paths_from_request(user_message, None)
+    if declared and len(real) >= need:
+        got = { (getattr(f, "path", "") or "").replace("\\", "/").lower() for f in real }
+        # Al menos la mitad de los paths pedidos (o main + otro).
+        hits = sum(1 for p in declared if p.lower() in got or any(g.endswith("/" + p.split("/")[-1].lower()) for g in got))
+        if hits < min(2, len(declared)):
             return False
     return True
 
