@@ -31,6 +31,18 @@ vim.api.nvim_create_user_command("Gla2Apply", function()
   require("gla2").apply_last()
 end, { desc = "Aplicar el último cambio de Gla-2" })
 
+vim.api.nvim_create_user_command("Gla2Undo", function()
+  require("gla2").undo()
+end, { desc = "Deshacer la última escritura de archivos de Gla-2" })
+
+vim.api.nvim_create_user_command("Gla2Aprender", function()
+  require("gla2").aprender()
+end, { desc = "Aprender patrones desde Cursor (colaboración)" })
+
+vim.api.nvim_create_user_command("Gla2Run", function()
+  require("gla2").run_last()
+end, { desc = "Ejecutar el último .py creado (sandbox con timeout)" })
+
 vim.keymap.set("n", "<leader>gp", function()
   require("gla2").open_projects()
 end, { desc = "Menú de proyectos" })

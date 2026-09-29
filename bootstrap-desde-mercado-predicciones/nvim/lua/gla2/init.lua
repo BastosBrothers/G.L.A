@@ -28,4 +28,16 @@ function M.apply_last()
   chat.apply_last()
 end
 
+function M.undo()
+  chat.undo()
+end
+
+function M.aprender()
+  chat.aprender()
+end
+
+function M.run_last()
+  chat.run_last()
+end
+
 return M

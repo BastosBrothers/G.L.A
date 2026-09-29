@@ -170,6 +170,11 @@ def cmd_json(_: argparse.Namespace) -> int:
                 "Si el usuario pide varios ejercicios/archivos, un ```file por cada uno "
                 "con el código real del historial (no un solo app/main.py vacío)."
             )
+        from src.entregas import recent_for_project
+
+        deliveries = recent_for_project(str(project_root or ""))
+        if deliveries:
+            extra = f"{extra}\n\n{deliveries}"
     else:
         if project_root:
             root_line = f"Proyecto activo (carpeta de trabajo): {project_root}"
@@ -189,6 +194,8 @@ def cmd_json(_: argparse.Namespace) -> int:
         pinned_skills=payload.get("pinned_skills") or None,
         extra_context=extra,
         model=(str(payload.get("model") or "").strip() or None),
+        project_root=str(project_root or "").strip() or None,
+        mode=mode or None,
     )
     try:
         response = run(request, confirm_write=None)
@@ -246,6 +253,19 @@ def cmd_aprender(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_test_ide(_: argparse.Namespace) -> int:
+    from src.test_ide_contract import main as test_main
+
+    return int(test_main())
+
+
+def cmd_run_file(args: argparse.Namespace) -> int:
+    from src.runner import run_project_script
+
+    print(run_project_script(args.path, cwd=args.cwd, stdin_text=args.stdin or ""))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m src.main",
@@ -276,6 +296,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Importar lecciones de colaboración desde transcripts de Cursor",
     )
     p_aprender.set_defaults(func=cmd_aprender)
+
+    p_test = sub.add_parser("test-ide", help="Tests del contrato IDE (sin Ollama)")
+    p_test.set_defaults(func=cmd_test_ide)
+
+    p_exec = sub.add_parser("exec", help="Ejecutar un .py del proyecto con timeout")
+    p_exec.add_argument("path", help="Ruta al script")
+    p_exec.add_argument("--cwd", default=None)
+    p_exec.add_argument("--stdin", default="")
+    p_exec.set_defaults(func=cmd_run_file)
 
     p_skill = sub.add_parser("skill", help="Catálogo y grafo de skills")
     skill_sub = p_skill.add_subparsers(dest="skill_command", required=True)

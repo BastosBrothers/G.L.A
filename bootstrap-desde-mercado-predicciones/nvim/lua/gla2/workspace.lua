@@ -270,7 +270,7 @@ local function paint_sidebar()
   local lines, marks, files = tree_lines()
   state.tree = files
   table.insert(lines, "")
-  table.insert(lines, "  " .. models.current())
+  table.insert(lines, "  " .. models.label())
   table.insert(marks, { line = #lines - 1, group = "Gla2Accent" })
   table.insert(lines, "  " .. (direct_mode() and "escritura directa" or "pide confirmación"))
   table.insert(marks, { line = #lines - 1, group = direct_mode() and "Gla2Ok" or "Gla2Warn" })
@@ -418,6 +418,38 @@ function M.context(query)
   end
   if sent == 0 then
     table.insert(lines, "(sin volcar archivos enteros; usa el árbol)")
+  end
+  -- Índice ligero: últimas entregas de Gla-2 en este proyecto.
+  local engine = vim.g.gla2_engine
+  if not engine or engine == "" then
+    local here = debug.getinfo(1, "S").source:sub(2)
+    engine = vim.fn.fnamemodify(here, ":h:h:h:h")
+  end
+  local entregas = engine .. "/datos/entregas.jsonl"
+  if state.root and vim.fn.filereadable(entregas) == 1 then
+    local rows = vim.fn.readfile(entregas)
+    local needle = state.root:gsub("[\\/]+$", ""):lower():gsub("\\", "/")
+    local matched = {}
+    for i = #rows, 1, -1 do
+      local ok, row = pcall(vim.json.decode, rows[i])
+      if ok and type(row) == "table" then
+        local proj = tostring(row.project or ""):gsub("[\\/]+$", ""):lower():gsub("\\", "/")
+        if proj ~= "" and (proj:find(needle, 1, true) or needle:find(proj, 1, true)) then
+          local paths = row.paths or {}
+          table.insert(matched, table.concat(paths, ", ") .. " ← " .. tostring(row.request or ""):sub(1, 80))
+          if #matched >= 5 then
+            break
+          end
+        end
+      end
+    end
+    if #matched > 0 then
+      table.insert(lines, "")
+      table.insert(lines, "Entregas recientes:")
+      for i = #matched, 1, -1 do
+        table.insert(lines, "- " .. matched[i])
+      end
+    end
   end
   return table.concat(lines, "\n")
 end

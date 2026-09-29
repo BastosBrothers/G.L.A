@@ -2,6 +2,7 @@ local M = {}
 
 local state = {
   name = nil,
+  create_name = nil,
   menu_buf = nil,
   menu_win = nil,
   items = {},
@@ -13,10 +14,16 @@ local function store_path()
   return dir .. "/model"
 end
 
+local function store_create_path()
+  local dir = vim.fn.stdpath("data") .. "/gla2"
+  vim.fn.mkdir(dir, "p")
+  return dir .. "/model_create"
+end
+
 local function installed()
   local out = vim.fn.system({ "ollama", "list" })
   if vim.v.shell_error ~= 0 then
-    return { "gla-2" }
+    return { "gla-2", "qwen2.5-coder:3b" }
   end
   local names = {}
   local first = true
@@ -34,6 +41,16 @@ local function installed()
     table.insert(names, "gla-2")
   end
   return names
+end
+
+local function has_model(want)
+  local low = (want or ""):lower()
+  for _, name in ipairs(installed()) do
+    if name:lower() == low or name:lower() == (low .. ":latest") then
+      return name
+    end
+  end
+  return nil
 end
 
 local function is_gla2(name)
@@ -64,12 +81,38 @@ function M.current()
   return state.name
 end
 
+function M.for_chat()
+  return M.current()
+end
+
+function M.for_create()
+  if state.create_name and state.create_name ~= "" then
+    return state.create_name
+  end
+  if vim.fn.filereadable(store_create_path()) == 1 then
+    local saved = vim.trim(table.concat(vim.fn.readfile(store_create_path()), ""))
+    if saved ~= "" then
+      state.create_name = saved
+      return saved
+    end
+  end
+  local preferred = has_model("qwen2.5-coder:3b") or has_model("qwen2.5-coder:7b")
+  if preferred then
+    return preferred
+  end
+  return M.current()
+end
+
 function M.weight()
   local name = M.current()
   if is_gla2(name) then
     return "gla-2"
   end
   return is_heavy(name) and "pesado" or "ligero"
+end
+
+function M.label()
+  return "chat:" .. M.for_chat() .. "  create:" .. M.for_create()
 end
 
 local function close_menu()
@@ -96,39 +139,53 @@ function M.use(name)
   if chat_ok and chat.render then
     chat.render()
   end
-  vim.notify("Modelo: " .. name .. " (" .. M.weight() .. ")", vim.log.levels.INFO)
+  vim.notify("Modelo chat: " .. name .. " (" .. M.weight() .. ")", vim.log.levels.INFO)
+end
+
+function M.use_create(name)
+  if not name or name == "" then
+    return
+  end
+  state.create_name = name
+  vim.fn.writefile({ name }, store_create_path())
+  close_menu()
+  vim.notify("Modelo creación: " .. name, vim.log.levels.INFO)
+  local chat_ok, chat = pcall(require, "gla2.chat")
+  if chat_ok and chat.render then
+    chat.render()
+  end
 end
 
 function M.menu()
   close_menu()
   local names = installed()
-  local items = {}
-  local light, heavy, own = nil, nil, nil
+  local items = {
+    { label = "— Chat (respuestas / charla) —", name = nil },
+    { label = "Chat → " .. M.for_chat(), name = M.for_chat(), kind = "chat" },
+  }
   for _, name in ipairs(names) do
-    if is_gla2(name) and not own then
-      own = name
-    elseif is_heavy(name) and not heavy then
-      heavy = name
-    elseif not is_heavy(name) and not is_gla2(name) and not light then
-      light = name
-    end
+    table.insert(items, { label = "  chat: " .. name, name = name, kind = "chat" })
   end
-  table.insert(items, { label = "Gla-2     " .. (own or "gla-2"), name = own or "gla-2" })
-  if light then
-    table.insert(items, { label = "Ligero    " .. light, name = light })
-  else
-    table.insert(items, { label = "Ligero    no instalado", name = nil })
+  table.insert(items, { label = "— Creación (código / archivos) —", name = nil })
+  table.insert(items, { label = "Create → " .. M.for_create(), name = M.for_create(), kind = "create" })
+  local create_pref = has_model("qwen2.5-coder:3b")
+  if create_pref then
+    table.insert(items, { label = "  create: " .. create_pref .. " (recomendado)", name = create_pref, kind = "create" })
   end
-  table.insert(items, { label = "Pesado    " .. (heavy or "deepseek-r1:8b"), name = heavy or "deepseek-r1:8b" })
   for _, name in ipairs(names) do
-    table.insert(items, { label = name, name = name })
+    table.insert(items, { label = "  create: " .. name, name = name, kind = "create" })
   end
   state.items = items
 
   local lines = { "" }
-  local width = 36
+  local width = 42
   for _, item in ipairs(items) do
-    local mark = item.name == M.current() and "  ● " or "    "
+    local mark = "    "
+    if item.kind == "chat" and item.name == M.for_chat() then
+      mark = "  ● "
+    elseif item.kind == "create" and item.name == M.for_create() then
+      mark = "  ● "
+    end
     local text = mark .. item.label
     width = math.max(width, vim.fn.strdisplaywidth(text) + 3)
     table.insert(lines, text)
@@ -140,13 +197,13 @@ function M.menu()
   vim.bo[state.menu_buf].buftype = "nofile"
   state.menu_win = vim.api.nvim_open_win(state.menu_buf, true, {
     relative = "editor",
-    row = 6,
+    row = 4,
     col = 3,
-    width = math.min(width, 58),
-    height = #lines,
+    width = math.min(width, 64),
+    height = math.min(#lines, 22),
     style = "minimal",
     border = "rounded",
-    title = " Modelo ",
+    title = " Modelos Gla-2 ",
     title_pos = "center",
   })
   require("gla2.theme").float(state.menu_win)
@@ -155,10 +212,13 @@ function M.menu()
     local line = vim.api.nvim_win_get_cursor(0)[1]
     local item = state.items[line - 1]
     if not item or not item.name then
-      vim.notify("No hay un modelo ligero en Ollama. Instala uno, por ejemplo: ollama pull qwen2.5-coder:1.5b", vim.log.levels.WARN)
       return
     end
-    M.use(item.name)
+    if item.kind == "create" then
+      M.use_create(item.name)
+    else
+      M.use(item.name)
+    end
   end
   vim.keymap.set("n", "<CR>", pick, { buffer = state.menu_buf, silent = true })
   vim.keymap.set("n", "<Esc>", close_menu, { buffer = state.menu_buf, silent = true })

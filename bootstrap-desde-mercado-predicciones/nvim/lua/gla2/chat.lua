@@ -12,6 +12,8 @@ local state = {
   turns = {},
   spin = 1,
   spin_timer = nil,
+  undo = nil,
+  last_written = {},
 }
 
 local SPIN = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
@@ -58,7 +60,7 @@ render_chat = function()
   local status = state.busy and (busy_mark() .. " trabajando") or "● listo"
   local lines = {
     "  CHAT",
-    "  " .. title .. "   ·   " .. model.current(),
+    "  " .. title .. "   ·   " .. model.label(),
     "  " .. status,
     "",
   }
@@ -467,13 +469,38 @@ local function is_stub_content(content)
   return false
 end
 
+local function record_entregas(paths, request)
+  local root = workspace().root()
+  if not root or not paths or #paths == 0 then
+    return
+  end
+  local engine = engine_root()
+  local dest = engine .. "/datos/entregas.jsonl"
+  vim.fn.mkdir(engine .. "/datos", "p")
+  local row = vim.json.encode({
+    ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    project = root,
+    request = (request or ""):sub(1, 500),
+    paths = paths,
+    note = "ide",
+  })
+  local prev = {}
+  if vim.fn.filereadable(dest) == 1 then
+    prev = vim.fn.readfile(dest)
+  end
+  table.insert(prev, row)
+  vim.fn.writefile(prev, dest)
+end
+
 local function apply_files(files)
   local root = workspace().root()
   if not root or not files or #files == 0 then
-    return 0
+    return 0, {}
   end
   local applied = 0
   local first = nil
+  local written = {}
+  local undo_batch = {}
   local root_norm = vim.fn.fnamemodify(root, ":p"):gsub("[\\/]+$", ""):lower()
   for _, item in ipairs(files) do
     local rel = (item.path or ""):gsub("\\", "/"):gsub("^/+", "")
@@ -491,18 +518,32 @@ local function apply_files(files)
       if not vim.startswith(full_norm, root_norm) then
         append(state.chat_buf, { "  (fuera del proyecto, no creado: " .. tostring(item.path) .. ")" })
       else
-        -- No pisar un archivo con código real usando un stub peor (ya filtrado) ni vacío.
         local exists = vim.fn.filereadable(full) == 1
+        local old = ""
         if exists then
-          local old = table.concat(vim.fn.readfile(full), "\n")
+          old = table.concat(vim.fn.readfile(full), "\n")
           if #old > #content + 40 and not is_stub_content(old) then
             append(state.chat_buf, { "  (conservado existente, no sobrescrito: " .. rel .. ")" })
             goto continue_file
           end
+          if #old > 2500 then
+            local yes = vim.fn.confirm("¿Sobrescribir archivo grande?\n" .. rel, "&Sí\n&No", 2) == 1
+            if not yes then
+              append(state.chat_buf, { "  (omitido por el usuario: " .. rel .. ")" })
+              goto continue_file
+            end
+          end
         end
+        table.insert(undo_batch, {
+          path = full,
+          rel = rel,
+          previous = exists and old or nil,
+          created = not exists,
+        })
         vim.fn.mkdir(vim.fn.fnamemodify(full, ":h"), "p")
         vim.fn.writefile(vim.split(content, "\n", { plain = true }), full)
         applied = applied + 1
+        table.insert(written, rel)
         if not first then
           first = full
         end
@@ -510,10 +551,14 @@ local function apply_files(files)
     end
     ::continue_file::
   end
+  if #undo_batch > 0 then
+    state.undo = undo_batch
+    state.last_written = written
+  end
   if first then
     open_in_editor(first)
   end
-  return applied
+  return applied, written
 end
 
 local function apply_last()
@@ -523,20 +568,23 @@ local function apply_last()
   end
   local buf = focus_code()
   local patches = state.last.patches
-  local created = {}
-  local files = patches.files or {}
-  for _, item in ipairs(files) do
-    if item.path and item.path ~= "" then
-      table.insert(created, item.path)
-    end
-  end
-  local n = apply_files(files)
+  local n, written = apply_files(patches.files or {})
   n = n + apply_replaces(patches.replaces or {}, buf)
   n = n + apply_diffs(patches.diffs or {})
   if n > 0 then
     workspace().refresh()
+    if written and #written > 0 then
+      local req = ""
+      for i = #state.turns, 1, -1 do
+        if state.turns[i].role == "user" then
+          req = state.turns[i].text or ""
+          break
+        end
+      end
+      record_entregas(written, req)
+    end
   end
-  return n, created
+  return n, written or {}
 end
 
 local function on_reply(decoded)
@@ -550,12 +598,9 @@ local function on_reply(decoded)
   local has_edits = #(patches.replaces or {}) > 0 or #(patches.diffs or {}) > 0
 
   if has_files then
-    -- Escribir ya: el usuario no debe pegar código a mano.
     local n, created = apply_last()
     if n > 0 and #created > 0 then
-      text = text
-        .. "\n\n✓ Creado en el proyecto: "
-        .. table.concat(created, ", ")
+      text = text .. "\n\n✓ Creado en el proyecto (" .. #created .. "):\n- " .. table.concat(created, "\n- ")
     elseif n == 0 then
       text = text .. "\n\n(No se pudo escribir el archivo en el proyecto.)"
     end
@@ -566,7 +611,7 @@ local function on_reply(decoded)
   render_chat()
 
   if has_files then
-    -- ya aplicado arriba
+    -- ya aplicado
   elseif has_edits then
     append(state.chat_buf, { "Hay cambios listos para el proyecto." })
     local yes = auto_write() or vim.fn.confirm("¿Aplicar el cambio de Gla-2 en el proyecto?", "&Sí\n&No", 1) == 1
@@ -711,6 +756,7 @@ local function send(text)
   if not creating and not lang and buf then
     lang = filetype_language(buf)
   end
+  local models = require("gla2.models")
   local payload = {
     message = payload_message,
     language = chatty and nil or lang,
@@ -719,7 +765,7 @@ local function send(text)
     mode = creating and "create" or (chatty and "chat" or "edit"),
     diagnostics = (not chatty and not creating and buf) and diagnostics_of(buf) or {},
     extra_context = chatty and "" or extra,
-    model = require("gla2.models").current(),
+    model = creating and models.for_create() or models.for_chat(),
   }
 
   vim.system({ python_cmd(), "-m", "src.main", "json" }, {
@@ -866,6 +912,82 @@ function M.apply_last()
   else
     append(state.chat_buf, { "  Cambios aplicados." })
   end
+end
+
+function M.undo()
+  ensure_chat()
+  local batch = state.undo
+  if not batch or #batch == 0 then
+    append(state.chat_buf, { "  (nada que deshacer)" })
+    return
+  end
+  local restored = 0
+  for i = #batch, 1, -1 do
+    local item = batch[i]
+    if item.created then
+      if vim.fn.filereadable(item.path) == 1 then
+        vim.fn.delete(item.path)
+        restored = restored + 1
+      end
+    elseif item.previous ~= nil then
+      vim.fn.mkdir(vim.fn.fnamemodify(item.path, ":h"), "p")
+      vim.fn.writefile(vim.split(item.previous, "\n", { plain = true }), item.path)
+      restored = restored + 1
+    end
+  end
+  state.undo = nil
+  state.last_written = {}
+  workspace().refresh()
+  append(state.chat_buf, { "  Deshecho: " .. restored .. " archivo(s)." })
+end
+
+function M.aprender()
+  ensure_chat()
+  append(state.chat_buf, { "  Aprendiendo desde Cursor…" })
+  vim.system({ python_cmd(), "-m", "src.main", "aprender" }, {
+    cwd = engine_root(),
+    text = true,
+  }, function(result)
+    vim.schedule(function()
+      local out = vim.trim((result.stdout or "") .. "\n" .. (result.stderr or ""))
+      if out == "" then
+        out = result.code == 0 and "(sin salida)" or "Error al aprender."
+      end
+      for line in (out .. "\n"):gmatch("([^\n]*)\n") do
+        append(state.chat_buf, { "  " .. line })
+      end
+    end)
+  end)
+end
+
+function M.run_last()
+  ensure_chat()
+  local root = workspace().root()
+  local rel = (state.last_written or {})[1]
+  if not rel or rel == "" then
+    append(state.chat_buf, { "  (no hay script reciente para ejecutar)" })
+    return
+  end
+  if not rel:match("%.py$") then
+    append(state.chat_buf, { "  (solo .py por ahora: " .. rel .. ")" })
+    return
+  end
+  local full = vim.fn.fnamemodify((root or "") .. "/" .. rel, ":p")
+  append(state.chat_buf, { "  Ejecutando " .. rel .. "…" })
+  vim.system({ python_cmd(), "-m", "src.main", "exec", full, "--cwd", root or "" }, {
+    cwd = engine_root(),
+    text = true,
+  }, function(result)
+    vim.schedule(function()
+      local out = vim.trim(result.stdout or result.stderr or "")
+      if out == "" then
+        out = "(sin salida)"
+      end
+      for line in (out .. "\n"):gmatch("([^\n]*)\n") do
+        append(state.chat_buf, { "  " .. line })
+      end
+    end)
+  end)
 end
 
 function M.send_text(text, from_range)

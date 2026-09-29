@@ -11,7 +11,9 @@ from src.context import build_system_prompt, build_user_message
 from src.dag import resolve
 from src.deepseek_client import ModelTurn, chat, strip_tool_dumps
 from src.diff import PatchSet, extract_patches
+from src.entregas import recent_for_project
 from src.fs_ops import validate_write_args
+from src.models_route import model_for_mode
 from src.skills import Skill, detect_language, select_skills, strip_skill_directives, wants_skill_authoring
 from src.text import scrub
 from src.tools import SELF_TOOLS, WRITE_TOOLS, call_tool, openai_tools
@@ -239,6 +241,8 @@ class EngineRequest:
     pinned_skills: list[str] | None = None
     extra_context: str | None = None
     model: str | None = None
+    project_root: str | None = None
+    mode: str | None = None
 
 
 @dataclass
@@ -355,6 +359,13 @@ def run(
     clean = strip_skill_directives(request.message) or request.message
     talk = is_conversational(clean)
     create = (not talk) and wants_code_creation(clean)
+    mode = (request.mode or ("chat" if talk else ("create" if create else "edit"))).lower()
+    if talk:
+        mode = "chat"
+    elif create:
+        mode = "create"
+    resolved_model = model_for_mode(mode, explicit=request.model)
+
     system = build_system_prompt(
         active_skills=[] if talk else graph.ordered,
         tool_names=[] if (talk or create) else tool_names,
@@ -393,6 +404,9 @@ def run(
             (user_extra or "").strip()
             or "Modo creación: archivos nuevos relativos al proyecto."
         )
+        deliveries = recent_for_project(request.project_root or "")
+        if deliveries:
+            user_extra += "\n\n" + deliveries
         if _wants_multi_file(clean):
             user_extra += (
                 "\nEntrega varios bloques ```file (uno por ejercicio), "
@@ -430,7 +444,7 @@ def run(
         final = chat(
             messages,
             tools=tools or None,
-            model=request.model,
+            model=resolved_model,
             num_predict=predict,
         )
         if not final.tool_calls:
@@ -448,7 +462,7 @@ def run(
                 messages
                 + [{"role": "user", "content": nudge}],
                 tools=None,
-                model=request.model,
+                model=resolved_model,
                 num_predict=predict,
             )
             break
@@ -502,7 +516,7 @@ def run(
         final = chat(
             retry_messages,
             tools=None,
-            model=request.model,
+            model=resolved_model,
             num_predict=predict,
         )
         text = strip_tool_dumps(clean_model_text(final.content or ""))
@@ -530,7 +544,7 @@ def run(
                 },
             ],
             tools=None,
-            model=request.model,
+            model=resolved_model,
             num_predict=predict or 1400,
         )
         text = strip_tool_dumps(clean_model_text(final.content or ""))
@@ -564,7 +578,12 @@ def run(
             code_text=text,
             patches=patches,
             language=language,
-            model=request.model,
+            model=resolved_model,
+        )
+    elif text and _is_manual_tutorial(text) and patches and patches.files:
+        text = _format_create_message(
+            "Entregué el código en el proyecto. No hace falta pegarlo a mano.",
+            patches,
         )
 
     return EngineResponse(

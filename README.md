@@ -137,6 +137,60 @@ Principios de colaboración (memoria del proyecto):
 
 ---
 
+## Versiones y snapshots
+
+G.L.A. se publica en dos capas: **versión** (estable) y **snapshot** (punto intermedio).
+
+### Versión (p. ej. `2.0`, rama `v2.0`)
+
+La versión del producto sube cuando **una serie de snapshots se vuelve estable**: ya no es un experimento suelto, sino un conjunto coherente y usable.
+
+Ejemplo: varias snapshots `A…`, `B…` y `C…` maduran → se corta **G.L.A. 2.0**.
+
+### Snapshot
+
+Una snapshot marca un cambio concreto **antes** (o entre) versiones estables. El nombre indica **qué tipo de cambio**, **cuándo** y **a qué versión pertenece**.
+
+#### Tipos (letra)
+
+| Letra | Qué cubre |
+|-------|-----------|
+| **A** | Funcionalidades de la IA (motor, orquestación, prompts, modos create/chat, etc.) |
+| **B** | Cambios en el IDE en sí (Neovim: chat, explorador, aplicar parches, UX) |
+| **C** | Recepción de skills, sandbox o formas de entrenamiento de la IA |
+| **X** | Cambios muy grandes o de contenido variado (varias áreas a la vez) |
+
+#### Números que acompañan la letra
+
+Tras la letra van, en este orden:
+
+1. **Fecha** — día, mes y año en dos dígitos cada uno: `DDMMAA`
+2. **Versión** — la versión G.L.A. a la que pertenece esa snapshot (p. ej. `2.0`)
+
+```text
+{letra}{DDMMAA}{versión}
+```
+
+#### Ejemplo
+
+`A2809262.0`
+
+| Parte | Valor | Significado |
+|-------|-------|-------------|
+| Tipo | `A` | Snapshot de funcionalidades de la IA |
+| Fecha | `280926` | 28 / 09 / 2026 |
+| Versión | `2.0` | Pertenece a G.L.A. **2.0** |
+
+Otros ejemplos:
+
+- `B2809262.0` — cambio de IDE el 28/09/2026, en la línea 2.0  
+- `C0110262.0` — skills / sandbox / entrenamiento el 01/10/2026, línea 2.0  
+- `X1510262.1` — cambio grande y mixto el 15/10/2026, línea 2.1  
+
+Cuando varias snapshots de una línea se consideran estables, sube la **versión** (p. ej. de `2.0` a `2.1`) y las snapshots nuevas llevan ya ese número.
+
+---
+
 ## Documentación adicional
 
 - [`NOTA-DESEMPENO.md`](NOTA-DESEMPENO.md) — criterios de evolución del motor
