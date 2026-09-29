@@ -139,7 +139,8 @@ Principios de colaboración (memoria del proyecto):
 
 ## Versiones y snapshots
 
-G.L.A. se publica en dos capas: **versión** (estable) y **snapshot** (punto intermedio).
+G.L.A. se publica en dos capas: **versión** (estable) y **snapshot** (punto intermedio).  
+Las ramas de trabajo se nombran con el **símbolo de snapshot** (`A` / `B` / `C` / `X` + fecha + versión), no con el nombre del modelo Ollama.
 
 ### Versión (p. ej. `2.0`, rama `v2.0`)
 
@@ -151,16 +152,16 @@ Ejemplo: varias snapshots `A…`, `B…` y `C…` maduran → se corta **G.L.A. 
 
 Una snapshot marca un cambio concreto **antes** (o entre) versiones estables. El nombre indica **qué tipo de cambio**, **cuándo** y **a qué versión pertenece**.
 
-#### Tipos (letra)
+#### Tipos (letra / símbolo)
 
-| Letra | Qué cubre |
-|-------|-----------|
+| Símbolo | Qué cubre |
+|---------|-----------|
 | **A** | Funcionalidades de la IA (motor, orquestación, prompts, modos create/chat, etc.) |
 | **B** | Cambios en el IDE en sí (Neovim: chat, explorador, aplicar parches, UX) |
 | **C** | Recepción de skills, sandbox o formas de entrenamiento de la IA |
 | **X** | Cambios muy grandes o de contenido variado (varias áreas a la vez) |
 
-#### Números que acompañan la letra
+#### Números que acompañan el símbolo
 
 Tras la letra van, en este orden:
 
@@ -168,26 +169,33 @@ Tras la letra van, en este orden:
 2. **Versión** — la versión G.L.A. a la que pertenece esa snapshot (p. ej. `2.0`)
 
 ```text
-{letra}{DDMMAA}{versión}
+{símbolo}{DDMMAA}{versión}
 ```
 
 #### Ejemplo
 
-`A2809262.0`
+`A2909262.0`
 
 | Parte | Valor | Significado |
 |-------|-------|-------------|
-| Tipo | `A` | Snapshot de funcionalidades de la IA |
-| Fecha | `280926` | 28 / 09 / 2026 |
+| Símbolo | `A` | Snapshot de funcionalidades de la IA |
+| Fecha | `290926` | 29 / 09 / 2026 |
 | Versión | `2.0` | Pertenece a G.L.A. **2.0** |
 
 Otros ejemplos:
 
-- `B2809262.0` — cambio de IDE el 28/09/2026, en la línea 2.0  
+- `B2909262.0` — cambio de IDE el 29/09/2026, en la línea 2.0  
 - `C0110262.0` — skills / sandbox / entrenamiento el 01/10/2026, línea 2.0  
-- `X1510262.1` — cambio grande y mixto el 15/10/2026, línea 2.1  
+- `X2809262.0` — cambio grande y mixto el 28/09/2026, línea 2.0  
 
 Cuando varias snapshots de una línea se consideran estables, sube la **versión** (p. ej. de `2.0` a `2.1`) y las snapshots nuevas llevan ya ese número.
+
+### Snapshot reciente (línea 2.0)
+
+| Rama | Qué corrigió / aportó |
+|------|------------------------|
+| **`X2809262.0`** | Paquete mixto: routing chat/create, diario de entregas, undo/run/aprender, tests IDE, esquema de versiones en README |
+| **`A2909262.0`** | Motor más ágil e inteligente en create: system slim, pase B con modelo ligero, critic multi-archivo + retry, imports entre hermanos relativos, predict por modo, menos anclaje a `app/main.py` |
 
 ### Dónde vive cada cosa (ramas)
 
@@ -195,9 +203,9 @@ Cuando varias snapshots de una línea se consideran estables, sube la **versión
 |------|-----------|
 | **`main`** | Solo la **versión V más nueva** ya estable (p. ej. el código de G.L.A. 2.0 cuando esa sea la última). No se hace push de snapshots a `main`. |
 | **`v2.0`**, **`v2.1`**, … | Línea de una versión concreta mientras se trabaja o se conserva. |
-| **`A…` / `B…` / `C…` / `X…`** | Snapshots intermedias (p. ej. `X2809262.0`). Quedan en su propia rama hasta estabilizarse. |
+| **`A…` / `B…` / `C…` / `X…`** | Snapshots intermedias (p. ej. `A2909262.0`). Quedan en su propia rama hasta estabilizarse. |
 
-Recordatorio: **a `main` va únicamente la versión V más reciente.** Las snapshots y el trabajo en curso van a ramas `A`/`B`/`C`/`X` o `v…`, no a `main`.
+Recordatorio: **a `main` va únicamente la versión V más reciente.** Las snapshots y el trabajo en curso van a ramas con su **símbolo** (`A`/`B`/`C`/`X`) o `v…`, no a `main`.
 
 ---
 
